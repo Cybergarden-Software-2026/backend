@@ -166,20 +166,20 @@ Compose, установленные владельцем сервера в `/etc
 API запрос модели не ждёт, остановка worker или модели на API не влияет.
 
 Сеть: worker подключён к `default` (PostgreSQL) и к внутренней сети
-`underctrl_qwen`; API, импортёр, БД и веб-фронтенд в неё не входят. Хостовый
-`llama-server` слушает `127.0.0.1:8080`, в сеть `underctrl_qwen` его выводит
+`qwen`; API, импортёр, БД и веб-фронтенд в неё не входят. Хостовый
+`llama-server` слушает `127.0.0.1:8080`, в сеть `qwen` его выводит
 отдельный systemd-проброс на шлюз этой сети. Реальный адрес модели в образ и
 репозиторий не попадает.
 
 **Однократная настройка vserver (до установки нового Compose).** Без сети
-`underctrl_qwen` `compose.vserver.yml` не поднимется.
+`qwen` `compose.vserver.yml` не поднимется.
 
 1. Сеть и шлюз:
 
    ```bash
    sudo docker network create --driver bridge --internal \
-     --opt com.docker.network.bridge.name=br-uc-qwen underctrl_qwen
-   sudo docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' underctrl_qwen
+     --opt com.docker.network.bridge.name=br-uc-qwen qwen
+   sudo docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' qwen
    ```
 
 2. Проброс `underctrl-qwen-worker.socket`/`.service` по образцу
@@ -193,7 +193,7 @@ API запрос модели не ждёт, остановка worker или м
 
    ```dotenv
    LLM_ENABLED=true
-   LLM_BASE_URL=http://<шлюз underctrl_qwen>:18080/v1
+   LLM_BASE_URL=http://<шлюз qwen>:18080/v1
    LLM_MODEL=qwen-local
    # первые 8 символов SHA-256 загруженного GGUF; при замене весов — обновить
    LLM_MODEL_REVISION=

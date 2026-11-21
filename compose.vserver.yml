@@ -4,7 +4,7 @@ services:
   api:
     ports: !override
       - "127.0.0.1:8001:8080"
-  # Только worker подключён к внутренней сети underctrl_qwen (проброс к llama-server на хосте).
+  # Только worker подключён к внутренней сети qwen (проброс к llama-server на хосте).
   # API, импортёр, БД и веб-фронтенд в эту сеть не входят. Адрес модели (LLM_BASE_URL) и
   # LLM_ENABLED=true для worker — в ai-worker.env на сервере, а не в общем .env.
   ai-worker:
@@ -14,8 +14,8 @@ services:
         required: false
     networks:
       - default
-      - underctrl_qwen
+      - qwen
 
 networks:
-  underctrl_qwen:
+  qwen:
     external: true

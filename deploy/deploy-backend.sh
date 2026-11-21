@@ -87,7 +87,8 @@ if [[ "$running_image" != "$importer_image" ]]; then
   echo 'API and importer do not share a runtime image; check the existing Compose project.' >&2
   exit 1
 fi
-if [[ "$(docker container inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$api")" == "$revision" &&
+running_revision=$(docker container inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$api")
+if [[ "$running_revision" == "$revision" &&
       "$(docker container inspect --format '{{.State.Running}}' "$importer")" == true ]] &&
    { (( ! worker_service )) ||
      [[ -n "$worker" &&
@@ -103,6 +104,8 @@ test_network="$test_prefix-net"
 test_db="$test_prefix-db"
 test_runner="$test_prefix-runner"
 previous=underctrl-backend:previous
+rollback_source="$image"
+rollback_pin=
 temporary_backup=
 backup=
 switch_started=0
@@ -133,6 +136,9 @@ cleanup() {
   docker container rm --force "$test_runner" "$test_db" >/dev/null 2>&1 || true
   docker network rm "$test_network" >/dev/null 2>&1 || true
   docker image rm "$test_image" >/dev/null 2>&1 || true
+  if [[ -n "$rollback_pin" ]]; then
+    docker image rm "$rollback_pin" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$temporary_backup" ]]; then
     rm -f -- "$temporary_backup"
   fi
@@ -141,6 +147,20 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
+
+# Pin the exact running image before a build can replace its revision tag.
+if docker image inspect "$running_image" >/dev/null 2>&1; then
+  rollback_pin="underctrl-backend:$test_prefix-rollback"
+  docker image tag "$running_image" "$rollback_pin"
+  rollback_source="$rollback_pin"
+else
+  importer_revision=$(docker container inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$importer")
+  if [[ "$running_revision" != "$revision" || "$importer_revision" != "$revision" ]]; then
+    echo "Cannot deploy $revision: running image $running_image is unavailable for rollback." >&2
+    exit 1
+  fi
+  echo "Running image $running_image is unavailable. Rollback will use the tested rebuild of $revision."
+fi
 
 echo "Building and testing backend $revision"
 git_as_cyber archive --format=tar "$revision" |
@@ -184,7 +204,7 @@ if [[ ! -s "$backup" ]]; then
   temporary_backup=
 fi
 
-docker image tag "$running_image" "$previous"
+docker image tag "$rollback_source" "$previous"
 compose "$image" run --rm --no-deps -T migrate
 switch_started=1
 services=(api importer)
