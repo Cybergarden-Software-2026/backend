@@ -48,8 +48,7 @@ docker version && docker compose version
 sudo ufw allow 22,80,443/tcp && sudo ufw enable
 ```
 
-Python, Rust и PostgreSQL на сервер ставить не нужно. Python 3 нужен только для `tools/demo.py`
-(сценарий демонстрации), если его запускать на сервере.
+Rust и PostgreSQL на сервер ставить не нужно. Python 3 нужен для проверки снимка при автодеплое и для `tools/demo.py`, если запускать сценарий демонстрации на сервере.
 
 ## 3. Настройка перед первым запуском
 
@@ -96,7 +95,7 @@ docker compose logs -f importer         # «Снимок принят: revision=
 ## Запуск на vserver
 
 Для этого варианта используйте Docker Engine 28 или новее и Docker Compose
-2.24.4 или новее. Назначения обрабатывает API без ключа. Из корня репозитория с настроенным `.env` выполните:
+2.24.4 или новее. Из корня репозитория с настроенным `.env` выполните:
 
 ```bash
 dc() { sudo docker compose -f docker-compose.yml -f compose.vserver.yml "$@"; }
@@ -112,6 +111,37 @@ API слушает порт `8080` внутри контейнера и дост
 `127.0.0.1:8080` используется Qwen. В выводе `dc ps --all` ожидаются
 `Exited (0)` для миграции и `healthy` для API после запуска. Готовность
 проверяется ответом `"database":true` на `/health/ready`.
+
+### Вход координатора на vserver
+
+1. Выложите backend, пока `COORDINATOR_ACCESS_KEY` отсутствует в `.env`, затем выложите frontend с экраном входа. До включения ключа `GET /api/v1/auth/coordinator/session` возвращает `required: false`.
+2. Установите из слитого коммита обновлённый скрипт и проверку готовности автодеплоя по инструкции в следующем разделе. После включения входа служба создаёт для проверки отдельную сессию и сразу отзывает её.
+3. На vserver выполните `openssl rand -hex 32`. Откройте `sudoedit /home/cyber/cybergarden/backend/.env` и добавьте или замените `COORDINATOR_ACCESS_KEY`, присвоив ему полученное значение. В `CORS_ORIGINS` укажите `https://cybergarden.sosmooth.ru`, сохранив остальные нужные адреса. Ключ вводится в поле «Ключ координатора» на сайте.
+4. Пересоздайте `api`, чтобы Docker применил изменения `.env`. Для установленного автодеплоя используйте блок ниже. Для ручного запуска используйте `dc up -d --no-build --no-deps --force-recreate api` из предыдущего раздела.
+
+```bash
+sudo flock -n /run/lock/underctrl-backend-deploy.lock bash -euo pipefail <<'RECREATE_API'
+repo=/home/cyber/cybergarden/backend
+config=/etc/underctrl-backend-deploy
+api_container=$(docker ps -q --filter label=com.docker.compose.project=mts-incident-dashboard \
+  --filter label=com.docker.compose.service=api)
+test -n "$api_container"
+api_image=$(docker container inspect --format '{{.Config.Image}}' "$api_container")
+UNDERCTRL_BACKEND_IMAGE="$api_image" docker compose \
+  --project-name mts-incident-dashboard --project-directory "$repo" --env-file "$repo/.env" \
+  -f "$config/docker-compose.yml" -f "$config/compose.vserver.yml" -f "$config/compose.image.yml" \
+  up -d --no-build --no-deps --force-recreate api
+RECREATE_API
+```
+
+После запуска откройте сайт по HTTPS и проверьте ответы без браузерной сессии.
+
+```bash
+curl -fsS https://cybergarden.sosmooth.ru/api/v1/auth/coordinator/session
+curl -sS -o /dev/null -w '%{http_code}\n' 'https://cybergarden.sosmooth.ru/api/v1/snapshot?view=web'
+```
+
+Первый запрос должен вернуть `required: true`, второй — `401`. Фронтенд использует существующий прокси `/api/v1`. Cookie привязана к HTTPS-хосту, через который координатор выполнил вход. После смены ключа и пересоздания `api` ранее выданные сессии становятся недействительными.
 
 ## Автодеплой из main на vserver
 
