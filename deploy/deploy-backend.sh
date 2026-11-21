@@ -32,10 +32,12 @@ check_backend() {
 
 # Есть ли сервис ai-worker в установленном Compose (до обновления файлов в $config — нет).
 has_worker_service() {
-  compose "$1" config --services | grep -qx ai-worker
+  local services
+  services=$(compose "$1" config --services) || return 1
+  grep -qx ai-worker <<<"$services"
 }
 
-# Worker жив: контейнер запущен, а HEALTHCHECK (heartbeat цикла обработки) не unhealthy.
+# Worker жив: контейнер запущен, а HEALTHCHECK (heartbeat цикла обработки) — healthy.
 check_worker() {
   local id=$1 health
   [[ -n "$id" && "$(docker container inspect --format '{{.State.Running}}' "$id")" == true ]] || return 1
