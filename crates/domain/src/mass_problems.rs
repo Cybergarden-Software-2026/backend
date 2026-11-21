@@ -15,7 +15,8 @@ use crate::projection::IncidentRow;
 
 pub const SAME_SERVICE: &str = "Один затронутый сервис; регистрации в пределах 24 часов";
 pub const SAME_SYMPTOMS: &str = "Похожие симптомы в заголовках; регистрации в пределах 24 часов";
-pub const SAME_CONTEXT: &str = "Один продукт и сценарий, похожее описание проблемы; регистрации в пределах 24 часов";
+pub const SAME_CONTEXT: &str =
+    "Один продукт и сценарий, похожее описание проблемы; регистрации в пределах 24 часов";
 pub const MAX_GAP_MS: u64 = 24 * 60 * 60 * 1000;
 pub const STOP_WORDS: &[&str] = &[
     "ошибка",
@@ -214,7 +215,13 @@ pub fn scenario(row: &IncidentRow) -> &str {
 }
 
 /// Доля общих слов: `common / union`, не меньше `min_common` общих слов.
-fn similar(a: &HashSet<String>, b: &HashSet<String>, min_common: usize, numerator: usize, denominator: usize) -> bool {
+fn similar(
+    a: &HashSet<String>,
+    b: &HashSet<String>,
+    min_common: usize,
+    numerator: usize,
+    denominator: usize,
+) -> bool {
     let common = a.intersection(b).count();
     let union = a.len() + b.len() - common;
     common >= min_common && denominator * common >= numerator * union
@@ -228,7 +235,11 @@ impl<'a> Candidate<'a> {
             let value: String = trimmed(field).chars().take(TEXT_CHARS).collect();
             text.extend(words(&value));
         }
-        Self { incident, terms, text }
+        Self {
+            incident,
+            terms,
+            text,
+        }
     }
 
     fn related(&self, other: &Self) -> Option<&'static str> {
@@ -290,12 +301,7 @@ pub fn automatic_clusters<'a>(rows: impl Iterator<Item = &'a IncidentRow>) -> Ve
             };
             let mut ids: Vec<_> = rows.iter().map(|row| row.sys_id.as_str()).collect();
             ids.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
-            Some(Cluster::from_rows(
-                ids.join("-"),
-                title,
-                reason.to_owned(),
-                &rows,
-            ))
+            Some(Cluster::from_rows(ids.join("-"), title, reason.to_owned(), &rows))
         })
         .collect();
     groups.sort_by(|a, b| {
@@ -305,4 +311,80 @@ pub fn automatic_clusters<'a>(rows: impl Iterator<Item = &'a IncidentRow>) -> Ve
             .then_with(|| a.id.cmp(&b.id))
     });
     groups
+}
+
+/// Задача проверки группы моделью: запись-якорь (наименьший `pk`) и вход.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewInput {
+    pub anchor_pk: i64,
+    pub anchor_id: String,
+    pub anchor_sys_id: String,
+    pub anchor_revision: i32,
+    /// `{"total": n, "members": [...]}` — участники по возрастанию `sysId`, не больше
+    /// [`crate::llm::CLUSTER_MAX_MEMBERS`]. Любое изменение полей или состава меняет вход.
+    pub input: serde_json::Value,
+}
+
+fn clip(value: &str, max: usize) -> serde_json::Value {
+    let value = value.trim();
+    if value.is_empty() {
+        return serde_json::Value::Null;
+    }
+    if value.chars().count() <= max {
+        return json!(value);
+    }
+    let mut out: String = value.chars().take(max).collect();
+    out.push('…');
+    json!(out)
+}
+
+/// Вход проверки для автоматической группы. `None`, если участников нет в `rows`.
+pub fn review_input(cluster: &Cluster, rows: &[IncidentRow]) -> Option<ReviewInput> {
+    use crate::llm::{CLUSTER_FIELD_CHARS, CLUSTER_MAX_MEMBERS};
+    let current = index(rows);
+    let mut members: Vec<&IncidentRow> = cluster
+        .sys_ids
+        .iter()
+        .filter_map(|id| current.get(id.as_str()).copied())
+        .collect();
+    if members.len() != cluster.sys_ids.len() || members.is_empty() {
+        return None;
+    }
+    members.sort_by(|a, b| a.sys_id.cmp(&b.sys_id));
+    let anchor = *members.iter().min_by_key(|row| row.pk)?;
+    let field = |v: &Option<String>| clip(trimmed(v), CLUSTER_FIELD_CHARS);
+    let listed: Vec<_> = members
+        .iter()
+        .take(CLUSTER_MAX_MEMBERS)
+        .map(|row| {
+            json!({
+                "id": row.id,
+                "header": field(&row.header),
+                "shortDescription": field(&row.short_description),
+                "description": field(&row.description),
+                "product": field(&row.product_name),
+                "service": field(&row.service),
+                "scenario": field(&row.scenario_name),
+            })
+        })
+        .collect();
+    Some(ReviewInput {
+        anchor_pk: anchor.pk,
+        anchor_id: anchor.id.clone(),
+        anchor_sys_id: anchor.sys_id.clone(),
+        anchor_revision: anchor.incident_revision,
+        input: json!({"total": members.len(), "members": listed}),
+    })
+}
+
+/// Подставляет проверку модели в автоматическую группу: подтверждённая группа получает
+/// название от модели, неподтверждённая — пометку в `reason`. Состав и `id` не меняются:
+/// решение о группе остаётся за правилами и координатором.
+pub fn apply_review(cluster: &mut Cluster, related: bool, title: &str, summary: &str) {
+    if related {
+        cluster.title = title.to_owned();
+        cluster.reason = format!("{}. ИИ: {summary}", cluster.reason);
+    } else {
+        cluster.reason = format!("{}. ИИ не подтвердил общую проблему: {summary}", cluster.reason);
+    }
 }

@@ -42,7 +42,10 @@ pub async fn get(State(state): State<AppState>, OriginalUri(uri): OriginalUri) -
     if state.settings.llm_enabled {
         let spec = JobSpec::summary(&state.settings);
         if let Some(stored) = analysis_repo::current_result(&mut loaded.tx, &spec, item.pk).await? {
-            let teams: HashSet<String> = analysis_repo::team_names(&mut loaded.tx).await?.into_iter().collect();
+            let teams: HashSet<String> = analysis_repo::team_names(&mut loaded.tx)
+                .await?
+                .into_iter()
+                .collect();
             let rules = candidate_teams(item, &loaded.rows, &state.settings.coordinator_group_name);
             apply_llm(&mut analysis, &stored.result, stored.finished_at, &rules, &teams);
         }
@@ -60,7 +63,11 @@ fn apply_llm(
     rules: &[TeamCandidate<'_>],
     teams: &HashSet<String>,
 ) {
-    let Some(summary) = result.get("summary").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) else {
+    let Some(summary) = result
+        .get("summary")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    else {
         return;
     };
     let offered: Vec<&str> = result
@@ -86,7 +93,9 @@ fn apply_llm(
         && had_rules
         && let Some(missing) = analysis["missing"].as_array_mut()
     {
-        missing.push(json!("Модель не выбрала команду: оснований в записи недостаточно, выберите команду вручную."));
+        missing.push(json!(
+            "Модель не выбрала команду: оснований в записи недостаточно, выберите команду вручную."
+        ));
     }
 }
 

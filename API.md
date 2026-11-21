@@ -20,6 +20,7 @@ Status reflects the committed implementation in the owning repository. Productio
 | Live shift assignments, coordination KPI and intervals between team assignments via `GET /api/v1/statistics/shift` | `backend` | Implemented |
 | Separate chart for the time between team assignments | `frontend-web` | Implemented |
 | Shared mass-problem membership and exclusions via `GET/PATCH /api/v1/problems/clusters` | `backend` | Implemented |
+| LLM review of automatic mass-problem groups (title and reason in `GET/PATCH /api/v1/problems/clusters`) | `backend` | Implemented (verified with a mock model; enabled per deployment) |
 | Shift PDF/Excel export and sequential group assignment | `frontend-web` | Implemented |
 | Atomic bulk team assignment and individual coordinator attribution | `backend` | Not implemented |
 | Same-origin `/api` proxy and `GET /healthz` | `frontend-web` | Implemented |
@@ -159,7 +160,7 @@ On `409` with `currentRevision`, fetch the snapshot again, display the current t
 
 ### Mass-problem workspace
 
-`GET /api/v1/problems/clusters` returns `{revision, items, exclusions}`. Each group in `items` has `id`, `title`, `reason`, `sysIds` and `incidentIds`. Candidates are inferred from registration within 24 hours plus one of: the same service, similar header symptoms, or the same product and usage scenario with a similar problem description (header, short and full description). The same product alone is never enough. Manual membership and exclusions are shared in PostgreSQL. Exclusion records include `sysId`, `incidentId`, `header`, `groupTitle`, `contextKey`, and `excludedAt` (Unix milliseconds). A service, title or registration-time change sends the affected incident back through automatic grouping.
+`GET /api/v1/problems/clusters` returns `{revision, items, exclusions}`. Each group in `items` has `id`, `title`, `reason`, `sysIds` and `incidentIds`. Candidates are inferred from registration within 24 hours plus one of: the same service, similar header symptoms, or the same product and usage scenario with a similar problem description (header, short and full description). The same product alone is never enough. With `LLM_ENABLED`, `ai-worker` also asks the local model whether each automatic group describes one problem. A confirmed group gets the model's Russian `title`, and `reason` gets the suffix `. ИИ: <summary>`; an unconfirmed group keeps its rules title and gets `. ИИ не подтвердил общую проблему: <summary>`. The review never changes `id`, membership or exclusions, and it is ignored once any member's header, descriptions, product, service, scenario or the group's membership changes. Manual groups keep the title and reason they had when created. Manual membership and exclusions are shared in PostgreSQL. Exclusion records include `sysId`, `incidentId`, `header`, `groupTitle`, `contextKey`, and `excludedAt` (Unix milliseconds). A service, title or registration-time change sends the affected incident back through automatic grouping.
 
 Send one operation to `PATCH /api/v1/problems/clusters` using the current `revision` from GET as `expectedRevision`:
 

@@ -1,4 +1,5 @@
-//! Очередь ИИ-задач в `analysis_jobs` (схема 0001, без новой миграции).
+//! Очередь ИИ-задач в `analysis_jobs`: выжимки карточек (`summary`) и проверка групп массовых
+//! сбоев (`cluster`, миграция 0004).
 //!
 //! Актуальность задачи определяется не номером ревизии, а входом: `input` — снимок полей реестра,
 //! из которых строится выжимка ([`INPUT_SQL`]). Поэтому смена команды или статуса не вызывает
@@ -33,6 +34,15 @@ pub struct JobSpec {
 }
 
 impl JobSpec {
+    /// Проверка групп массовых сбоев текущей генерации.
+    pub fn cluster(settings: &dashboard_config::Settings) -> Self {
+        Self {
+            kind: dashboard_domain::llm::CLUSTER_KIND.to_owned(),
+            prompt_version: dashboard_domain::llm::CLUSTER_PROMPT_VERSION.to_owned(),
+            ..Self::summary(settings)
+        }
+    }
+
     /// Задача `summary` текущей генерации из настроек (общих для импортёра, API и `ai-worker`).
     pub fn summary(settings: &dashboard_config::Settings) -> Self {
         Self {
@@ -72,7 +82,7 @@ pub async fn enqueue(conn: &mut PgConnection, spec: &JobSpec) -> Result<u64, sql
            WHERE j.incident_pk = i.pk AND j.kind = $1 AND j.model = $2 AND j.prompt_version = $3 \
              AND j.input = {INPUT_SQL} AND j.error IS DISTINCT FROM '{OBSOLETE}') \
          ORDER BY i.pk \
-         ON CONFLICT ON CONSTRAINT uq_analysis_jobs_incident_pk DO NOTHING"
+         ON CONFLICT DO NOTHING"
     );
     let done = sqlx::query(sqlx::AssertSqlSafe(insert))
         .bind(&spec.kind)
@@ -144,7 +154,11 @@ pub async fn claim(
 }
 
 /// Совпадает ли вход задачи с текущей записью реестра (запись присутствует).
-pub async fn input_is_current(conn: &mut PgConnection, incident_pk: i64, input: &Value) -> Result<bool, sqlx::Error> {
+pub async fn input_is_current(
+    conn: &mut PgConnection,
+    incident_pk: i64,
+    input: &Value,
+) -> Result<bool, sqlx::Error> {
     let sql = format!("SELECT {INPUT_SQL} = $2 FROM incidents i WHERE i.pk = $1 AND i.is_present");
     let current: Option<bool> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(incident_pk)
@@ -255,5 +269,99 @@ pub async fn current_result(
 
 /// Названия справочника команд.
 pub async fn team_names(conn: &mut PgConnection) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar("SELECT name FROM teams ORDER BY name").fetch_all(conn).await
+    sqlx::query_scalar("SELECT name FROM teams ORDER BY name")
+        .fetch_all(conn)
+        .await
+}
+
+// ---------------------------------------------------------------- проверка групп массовых сбоев
+
+/// Задача `cluster` для группы: запись-якорь и вход (см. `dashboard_domain::mass_problems::review_input`).
+#[derive(Debug, Clone)]
+pub struct NewReview<'a> {
+    pub anchor_pk: i64,
+    pub anchor_id: &'a str,
+    pub anchor_sys_id: &'a str,
+    pub anchor_revision: i32,
+    pub input: &'a Value,
+}
+
+/// Ставит проверки для текущих автоматических групп, у которых ещё нет задачи с тем же входом,
+/// и снимает с очереди ожидающие проверки групп, которых больше нет. Возвращает число новых задач.
+pub async fn enqueue_reviews(
+    conn: &mut PgConnection,
+    spec: &JobSpec,
+    reviews: &[NewReview<'_>],
+) -> Result<u64, sqlx::Error> {
+    let inputs: Vec<&Value> = reviews.iter().map(|r| r.input).collect();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE analysis_jobs SET status = 'failed', error = '{OBSOLETE}', locked_until = NULL, \
+           finished_at = now(), updated_at = now() \
+         WHERE kind = $1 AND status = 'queued' \
+           AND (model <> $2 OR prompt_version <> $3 OR NOT (input = ANY($4::jsonb[])))"
+    )))
+    .bind(&spec.kind)
+    .bind(&spec.model)
+    .bind(&spec.prompt_version)
+    .bind(&inputs)
+    .execute(&mut *conn)
+    .await?;
+    let mut queued = 0;
+    for review in reviews {
+        let done = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO analysis_jobs \
+               (incident_pk, incident_id, sys_id, kind, incident_revision, input, model, prompt_version, max_attempts) \
+             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9 \
+             WHERE NOT EXISTS (SELECT 1 FROM analysis_jobs j \
+               WHERE j.kind = $4 AND j.model = $7 AND j.prompt_version = $8 AND j.input = $6 \
+                 AND j.error IS DISTINCT FROM '{OBSOLETE}') \
+             ON CONFLICT DO NOTHING"
+        )))
+        .bind(review.anchor_pk)
+        .bind(review.anchor_id)
+        .bind(review.anchor_sys_id)
+        .bind(&spec.kind)
+        .bind(review.anchor_revision)
+        .bind(review.input)
+        .bind(&spec.model)
+        .bind(&spec.prompt_version)
+        .bind(spec.max_attempts)
+        .execute(&mut *conn)
+        .await?;
+        queued += done.rows_affected();
+    }
+    Ok(queued)
+}
+
+/// Готовые проверки для указанных входов: пары (вход, результат), по последней на вход.
+pub async fn review_results(
+    conn: &mut PgConnection,
+    spec: &JobSpec,
+    inputs: &[&Value],
+) -> Result<Vec<(Value, Value)>, sqlx::Error> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "SELECT DISTINCT ON (input) input, result FROM analysis_jobs \
+         WHERE kind = $1 AND model = $2 AND prompt_version = $3 AND status = 'completed' \
+           AND provider = 'llm' AND result IS NOT NULL AND input = ANY($4::jsonb[]) \
+         ORDER BY input, finished_at DESC",
+    )
+    .bind(&spec.kind)
+    .bind(&spec.model)
+    .bind(&spec.prompt_version)
+    .bind(inputs)
+    .fetch_all(conn)
+    .await?;
+    rows.iter()
+        .map(|r| Ok((r.try_get("input")?, r.try_get("result")?)))
+        .collect()
+}
+
+/// Разметка групп координаторами (`mass_problem_workspace.state`).
+pub async fn mass_problem_workspace(conn: &mut PgConnection) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT state FROM mass_problem_workspace WHERE id = 1")
+        .fetch_one(conn)
+        .await
 }

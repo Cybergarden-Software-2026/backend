@@ -39,7 +39,10 @@ pub fn candidate_teams<'a>(
     for (index, other) in items.iter().enumerate() {
         let team = other.assigned_group_name.as_deref().unwrap_or_default();
         if other.sys_id == item.sys_id
-            || !matches!(state_of(other), NormalizedState::Resolved | NormalizedState::Closed)
+            || !matches!(
+                state_of(other),
+                NormalizedState::Resolved | NormalizedState::Closed
+            )
             || other.completion_date.is_none()
             || team.trim().is_empty()
             || team == coordinator_group

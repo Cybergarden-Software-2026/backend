@@ -38,7 +38,6 @@ pub(crate) fn is_page_request(p: &Params) -> bool {
 /// Как stateOf в веб-клиенте: неизвестный stateEnum сохраняет статус Unknown.
 pub(crate) use dashboard_domain::analysis::state_of;
 
-
 pub(crate) fn sla_kind(row: &IncidentRow, now: DateTime<Utc>) -> &'static str {
     use NormalizedState::*;
     match state_of(row) {

@@ -40,7 +40,13 @@ impl LlmClient {
 
     /// Отправляет запрос и возвращает `choices[0].message.content`.
     pub async fn chat(&self, body: &Value) -> Result<String, CallError> {
-        let mut response = self.http.post(&self.url).json(body).send().await.map_err(describe)?;
+        let mut response = self
+            .http
+            .post(&self.url)
+            .json(body)
+            .send()
+            .await
+            .map_err(describe)?;
         let status = response.status();
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(describe)? {
@@ -51,11 +57,13 @@ impl LlmClient {
         }
         if !status.is_success() {
             let message = format!("HTTP {}", status.as_u16());
-            return Err(if status.as_u16() == 429 || status.is_server_error() || status.as_u16() == 408 {
-                CallError::Transient(message)
-            } else {
-                CallError::Permanent(message)
-            });
+            return Err(
+                if status.as_u16() == 429 || status.is_server_error() || status.as_u16() == 408 {
+                    CallError::Transient(message)
+                } else {
+                    CallError::Permanent(message)
+                },
+            );
         }
         let value: Value = serde_json::from_slice(&bytes)
             .map_err(|e| CallError::Transient(format!("response is not JSON: {e}")))?;

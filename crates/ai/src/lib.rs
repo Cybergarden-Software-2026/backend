@@ -16,8 +16,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use dashboard_config::Settings;
 use dashboard_domain::analysis::candidate_teams;
-use dashboard_domain::llm::{SummaryInput, chat_request, parse_output};
-use dashboard_store::analysis_repo::{self, ClaimedJob, JobSpec, OBSOLETE};
+use dashboard_domain::llm::{
+    CLUSTER_KIND, SummaryInput, chat_request, cluster_request, parse_cluster_output, parse_output,
+};
+use dashboard_domain::mass_problems::{ReviewInput, Workspace, review_input};
+use dashboard_store::analysis_repo::{self, ClaimedJob, JobSpec, NewReview, OBSOLETE};
 use dashboard_store::read_repo;
 use serde_json::json;
 use sqlx::PgPool;
@@ -28,6 +31,9 @@ pub use client::{CallError, LlmClient};
 /// Повторная постановка задач для карточек без актуальной задачи (на случай, если импортёр
 /// работал с выключенной интеграцией).
 const BACKFILL_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Как часто сверяются автоматические группы массовых сбоев с очередью проверок.
+const REVIEW_SYNC_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Файл, время изменения которого показывает, что цикл жив (`ai-worker --healthcheck`).
 pub fn heartbeat_path() -> PathBuf {
@@ -79,16 +85,19 @@ pub struct Worker {
     pub pool: PgPool,
     pub client: LlmClient,
     pub spec: JobSpec,
+    pub cluster_spec: JobSpec,
 }
 
 impl Worker {
     pub fn new(settings: Arc<Settings>, pool: PgPool, client: LlmClient) -> Self {
         let spec = JobSpec::summary(&settings);
+        let cluster_spec = JobSpec::cluster(&settings);
         Self {
             settings,
             pool,
             client,
             spec,
+            cluster_spec,
         }
     }
 
@@ -98,22 +107,71 @@ impl Worker {
         analysis_repo::enqueue(&mut conn, &self.spec).await
     }
 
-    /// Берёт и обрабатывает одну задачу. `None` — очередь пуста.
-    pub async fn process_one(&self, stop: &mut watch::Receiver<bool>) -> Result<Option<Outcome>, sqlx::Error> {
+    /// Проверки для текущих автоматических групп (без ручных групп и исключённых записей).
+    pub async fn current_reviews(&self) -> Result<Vec<ReviewInput>, sqlx::Error> {
+        let mut tx = read_repo::begin_consistent_read(&self.pool).await?;
+        let rows = read_repo::present_incidents(&mut tx).await?;
+        let state = analysis_repo::mass_problem_workspace(&mut tx).await?;
+        tx.rollback().await?;
+        let workspace: Workspace = serde_json::from_value(state).unwrap_or(Workspace {
+            groups: Vec::new(),
+            exclusions: Vec::new(),
+        });
+        Ok(workspace
+            .automatic(&rows)
+            .iter()
+            .filter_map(|cluster| review_input(cluster, &rows))
+            .collect())
+    }
+
+    /// Ставит проверки для новых групп и снимает с очереди исчезнувшие (идемпотентно).
+    pub async fn sync_reviews(&self) -> Result<u64, sqlx::Error> {
+        let reviews = self.current_reviews().await?;
+        let new: Vec<NewReview<'_>> = reviews
+            .iter()
+            .map(|r| NewReview {
+                anchor_pk: r.anchor_pk,
+                anchor_id: &r.anchor_id,
+                anchor_sys_id: &r.anchor_sys_id,
+                anchor_revision: r.anchor_revision,
+                input: &r.input,
+            })
+            .collect();
+        let mut conn = self.pool.acquire().await?;
+        analysis_repo::enqueue_reviews(&mut conn, &self.cluster_spec, &new).await
+    }
+
+    /// Берёт и обрабатывает одну задачу (сначала проверки групп: их мало, а координатор
+    /// видит их сразу). `None` — очередь пуста.
+    pub async fn process_one(
+        &self,
+        stop: &mut watch::Receiver<bool>,
+    ) -> Result<Option<Outcome>, sqlx::Error> {
         let job = {
             let mut conn = self.pool.acquire().await?;
-            analysis_repo::claim(&mut conn, &self.spec, self.settings.llm_lease).await?
+            match analysis_repo::claim(&mut conn, &self.cluster_spec, self.settings.llm_lease).await? {
+                Some(job) => Some((job, true)),
+                None => analysis_repo::claim(&mut conn, &self.spec, self.settings.llm_lease)
+                    .await?
+                    .map(|job| (job, false)),
+            }
         };
-        let Some(job) = job else { return Ok(None) };
+        let Some((job, is_cluster)) = job else {
+            return Ok(None);
+        };
         let started = Instant::now();
-        let outcome = self.run(&job, stop).await?;
+        let outcome = if is_cluster {
+            self.run_review(&job, stop).await?
+        } else {
+            self.run(&job, stop).await?
+        };
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         match &outcome {
             Outcome::Completed | Outcome::Obsolete | Outcome::Stale | Outcome::Stopped => {
-                tracing::info!(job = %job.id, attempt = job.attempt, elapsed_ms, outcome = ?outcome, "ИИ-задача обработана");
+                tracing::info!(job = %job.id, kind = if is_cluster { CLUSTER_KIND } else { "summary" }, attempt = job.attempt, elapsed_ms, outcome = ?outcome, "ИИ-задача обработана");
             }
             Outcome::Retry(_) | Outcome::Failed(_) => {
-                tracing::warn!(job = %job.id, attempt = job.attempt, elapsed_ms, outcome = ?outcome, "ИИ-задача не выполнена");
+                tracing::warn!(job = %job.id, kind = if is_cluster { CLUSTER_KIND } else { "summary" }, attempt = job.attempt, elapsed_ms, outcome = ?outcome, "ИИ-задача не выполнена");
             }
         }
         Ok(Some(outcome))
@@ -140,7 +198,9 @@ impl Worker {
             Ok(input) => input,
             Err(e) => {
                 let error = format!("invalid job input: {e}");
-                return self.finish_failed(job, &error, None, Outcome::Failed(error.clone())).await;
+                return self
+                    .finish_failed(job, &error, None, Outcome::Failed(error.clone()))
+                    .await;
             }
         };
         let body = chat_request(
@@ -150,14 +210,8 @@ impl Worker {
             self.settings.llm_max_tokens,
             usize::try_from(self.settings.llm_input_max_chars).unwrap_or(usize::MAX),
         );
-        let reply = tokio::select! {
-            reply = self.client.chat(&body) => reply,
-            _ = stop.wait_for(|stopped| *stopped) => {
-                // Попытка не засчитывается: задача сразу вернётся в очередь.
-                let mut conn = self.pool.acquire().await?;
-                analysis_repo::release(&mut conn, job).await?;
-                return Ok(Outcome::Stopped);
-            }
+        let Some(reply) = self.call(job, &body, stop).await? else {
+            return Ok(Outcome::Stopped);
         };
         match reply {
             Ok(content) => match parse_output(&content, &candidates) {
@@ -173,15 +227,86 @@ impl Worker {
                 }
                 Err(e) => {
                     let error = format!("invalid output: {e}");
-                    self.finish_failed(job, &error, Some(retry_delay(job.attempt)), Outcome::Retry(error.clone()))
-                        .await
+                    self.finish_failed(
+                        job,
+                        &error,
+                        Some(retry_delay(job.attempt)),
+                        Outcome::Retry(error.clone()),
+                    )
+                    .await
                 }
             },
-            Err(CallError::Transient(e)) => {
+            Err(e) => self.call_failed(job, e).await,
+        }
+    }
+
+    async fn run_review(
+        &self,
+        job: &ClaimedJob,
+        stop: &mut watch::Receiver<bool>,
+    ) -> Result<Outcome, sqlx::Error> {
+        if !self.current_reviews().await?.iter().any(|r| r.input == job.input) {
+            return self.finish_failed(job, OBSOLETE, None, Outcome::Obsolete).await;
+        }
+        let body = cluster_request(&self.settings.llm_model, &job.input, self.settings.llm_max_tokens);
+        let Some(reply) = self.call(job, &body, stop).await? else {
+            return Ok(Outcome::Stopped);
+        };
+        match reply {
+            Ok(content) => match parse_cluster_output(&content) {
+                Ok(output) => {
+                    let result = json!({
+                        "related": output.related,
+                        "title": output.title,
+                        "summary": output.summary,
+                    });
+                    let mut conn = self.pool.acquire().await?;
+                    let saved = analysis_repo::complete(&mut conn, job, "llm", &result).await?;
+                    Ok(if saved { Outcome::Completed } else { Outcome::Stale })
+                }
+                Err(e) => {
+                    let error = format!("invalid output: {e}");
+                    self.finish_failed(
+                        job,
+                        &error,
+                        Some(retry_delay(job.attempt)),
+                        Outcome::Retry(error.clone()),
+                    )
+                    .await
+                }
+            },
+            Err(e) => self.call_failed(job, e).await,
+        }
+    }
+
+    /// Запрос к модели с учётом остановки. `None` — worker останавливается, задача возвращена.
+    async fn call(
+        &self,
+        job: &ClaimedJob,
+        body: &serde_json::Value,
+        stop: &mut watch::Receiver<bool>,
+    ) -> Result<Option<Result<String, CallError>>, sqlx::Error> {
+        tokio::select! {
+            reply = self.client.chat(body) => Ok(Some(reply)),
+            _ = stop.wait_for(|stopped| *stopped) => {
+                // Попытка не засчитывается: задача сразу вернётся в очередь.
+                let mut conn = self.pool.acquire().await?;
+                analysis_repo::release(&mut conn, job).await?;
+                Ok(None)
+            }
+        }
+    }
+
+    async fn call_failed(&self, job: &ClaimedJob, error: CallError) -> Result<Outcome, sqlx::Error> {
+        match error {
+            CallError::Transient(e) => {
                 self.finish_failed(job, &e, Some(retry_delay(job.attempt)), Outcome::Retry(e.clone()))
                     .await
             }
-            Err(CallError::Permanent(e)) => self.finish_failed(job, &e, None, Outcome::Failed(e.clone())).await,
+            CallError::Permanent(e) => {
+                self.finish_failed(job, &e, None, Outcome::Failed(e.clone()))
+                    .await
+            }
         }
     }
 
@@ -205,7 +330,19 @@ impl Worker {
     /// Основной цикл до сигнала остановки. Ошибки БД не завершают процесс.
     pub async fn run_loop(&self, mut stop: watch::Receiver<bool>, heartbeat: Option<&Path>) {
         let mut last_backfill: Option<Instant> = None;
+        let mut last_sync: Option<Instant> = None;
         while !*stop.borrow() {
+            if last_sync.is_none_or(|t| t.elapsed() >= REVIEW_SYNC_INTERVAL) {
+                match self.sync_reviews().await {
+                    Ok(queued) => {
+                        last_sync = Some(Instant::now());
+                        if queued > 0 {
+                            tracing::info!(queued, "Поставлены проверки групп массовых сбоев");
+                        }
+                    }
+                    Err(e) => tracing::warn!("Не удалось поставить проверки групп: {e}"),
+                }
+            }
             if last_backfill.is_none_or(|t| t.elapsed() >= BACKFILL_INTERVAL) {
                 match self.backfill().await {
                     Ok(queued) => {

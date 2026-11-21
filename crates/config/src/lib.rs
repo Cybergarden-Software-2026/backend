@@ -240,7 +240,10 @@ impl Settings {
             Some(v) => {
                 let lower = v.to_ascii_lowercase();
                 if !lower.starts_with("http://") && !lower.starts_with("https://") {
-                    r.problem("LLM_BASE_URL", format!("expected http:// or https:// URL, got {v:?}"));
+                    r.problem(
+                        "LLM_BASE_URL",
+                        format!("expected http:// or https:// URL, got {v:?}"),
+                    );
                 }
                 Some(v.trim_end_matches('/').to_owned())
             }
@@ -257,7 +260,10 @@ impl Settings {
         let llm_timeout = r.seconds("llm_timeout_seconds", 60.0, false);
         let llm_lease = r.seconds("llm_lease_seconds", 120.0, false);
         if llm_lease <= llm_timeout {
-            r.problem("LLM_LEASE_SECONDS", "must be greater than LLM_TIMEOUT_SECONDS".into());
+            r.problem(
+                "LLM_LEASE_SECONDS",
+                "must be greater than LLM_TIMEOUT_SECONDS".into(),
+            );
         }
 
         let settings = Settings {
@@ -625,7 +631,12 @@ mod tests {
         ])
         .unwrap_err();
         let text = err.to_string();
-        for key in ["LLM_BASE_URL", "LLM_MODEL:", "LLM_LEASE_SECONDS", "LLM_MAX_ATTEMPTS"] {
+        for key in [
+            "LLM_BASE_URL",
+            "LLM_MODEL:",
+            "LLM_LEASE_SECONDS",
+            "LLM_MAX_ATTEMPTS",
+        ] {
             assert!(text.contains(key), "{key} not in {text}");
         }
     }
