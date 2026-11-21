@@ -72,6 +72,12 @@ pub struct Settings {
     pub source_naive_timezone: Tz,
     pub importer_embedded: bool,
 
+    // --- Демо-режим (тестовые маршруты фронтенда) ---
+    /// `POST /api/v1/demo` и `PUT /api/v1/incidents` переписывают файл источника. По умолчанию выключены.
+    pub demo_api_enabled: bool,
+    /// Эталонная выгрузка для сценария `reset`; пустое значение — сценарий недоступен.
+    pub demo_seed_path: Option<PathBuf>,
+
     // --- Бизнес-правила ---
     pub coordinator_group_name: String,
     pub critical_resolved_window_hours: u32,
@@ -229,6 +235,12 @@ impl Settings {
             import_stable_read_delay: r.seconds("import_stable_read_delay_seconds", 0.05, true),
             source_naive_timezone,
             importer_embedded: r.boolean("importer_embedded", false),
+            demo_api_enabled: r.boolean("demo_api_enabled", false),
+            demo_seed_path: vars
+                .get("demo_seed_path")
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
             coordinator_group_name: r
                 .string("coordinator_group_name", "КЦ ИТ Координаторы Массовых Инцидентов"),
             critical_resolved_window_hours: r.number(
@@ -498,6 +510,16 @@ mod tests {
         .unwrap();
         assert!(s.importer_embedded);
         assert_eq!(s.source_naive_timezone, chrono_tz::Europe::Moscow);
+    }
+
+    #[test]
+    fn demo_api_is_disabled_by_default() {
+        let s = with(&[]).unwrap();
+        assert!(!s.demo_api_enabled);
+        assert_eq!(s.demo_seed_path, None);
+        let s = with(&[("DEMO_API_ENABLED", "true"), ("DEMO_SEED_PATH", " /data/seed.json ")]).unwrap();
+        assert!(s.demo_api_enabled);
+        assert_eq!(s.demo_seed_path, Some(PathBuf::from("/data/seed.json")));
     }
 
     /// `.env.example` в корне репозитория разбирается без ошибок.

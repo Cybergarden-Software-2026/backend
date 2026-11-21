@@ -378,6 +378,173 @@
           }
         },
         "description": "Параметр page или pageSize выбирает постраничную очередь веб-клиента. Её также включают priority, status, sla, sort=newest, group=all/resolved/closed и team=__unassigned__. Прежний режим с limit/cursor сохраняет курсорную пагинацию."
+      },
+      "put": {
+        "tags": [
+          "demo"
+        ],
+        "summary": "Заменить тестовую выгрузку",
+        "description": "Проверяет массив инцидентов, атомарно записывает его в JSON_SOURCE_PATH и сразу импортирует. Отклонённая выгрузка источник не меняет. Доступно только при DEMO_API_ENABLED=true; если задан ASSIGNMENT_TOKEN, нужен ключ координатора.",
+        "operationId": "demo_replace_incidents",
+        "security": [
+          {},
+          {
+            "CoordinatorKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Полный веб-снимок после изменения",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Выгрузка не прошла проверку (SNAPSHOT_REJECTED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Требуется ключ координатора",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Демо-режим выключен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Источник недоступен для записи",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Слишком большой запрос",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/demo": {
+      "post": {
+        "tags": [
+          "demo"
+        ],
+        "summary": "Выполнить демо-сценарий",
+        "description": "Меняет тестовую выгрузку по сценарию кнопок «Симуляция»; reset восстанавливает файл DEMO_SEED_PATH. Доступно только при DEMO_API_ENABLED=true; если задан ASSIGNMENT_TOKEN, нужен ключ координатора.",
+        "operationId": "demo_simulate",
+        "security": [
+          {},
+          {
+            "CoordinatorKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DemoRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Полный веб-снимок после изменения",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неизвестный сценарий или выгрузка не прошла проверку",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Требуется ключ координатора",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Демо-режим выключен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Источник или DEMO_SEED_PATH недоступны",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/incidents/{key}": {
@@ -3210,6 +3377,30 @@
         "required": [
           "team",
           "expectedRevision"
+        ]
+      },
+      "DemoRequest": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "coordinator-wait",
+              "mass",
+              "unassigned",
+              "critical",
+              "assign",
+              "deadline",
+              "resolve",
+              "reopen",
+              "research",
+              "close",
+              "reset"
+            ]
+          }
+        },
+        "required": [
+          "action"
         ]
       }
     },

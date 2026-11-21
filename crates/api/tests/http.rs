@@ -161,3 +161,47 @@ async fn app_error_body_has_details() {
         r#"{"error":"Инцидент не найден","code":"INCIDENT_NOT_FOUND","message":"Инцидент не найден","requestId":"-","sysId":"abc"}"#
     );
 }
+
+fn json_request(method: &str, uri: &str, body: &Value, auth: Option<&str>) -> Request<Body> {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("Content-Type", "application/json");
+    if let Some(value) = auth {
+        req = req.header("Authorization", value);
+    }
+    req.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn demo_routes_are_hidden_unless_enabled() {
+    let req = json_request("POST", "/api/v1/demo", &json!({"action":"mass"}), None);
+    let (status, _, body) = call(app(&[]), req).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "NOT_FOUND");
+    let req = json_request("PUT", "/api/v1/incidents", &json!([]), None);
+    let (status, _, body) = call(app(&[]), req).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(body["code"], "METHOD_NOT_ALLOWED");
+}
+
+#[tokio::test]
+async fn demo_routes_require_the_coordinator_key_when_configured() {
+    let vars = [("DEMO_API_ENABLED", "true"), ("ASSIGNMENT_TOKEN", "local-test")];
+    for req in [
+        json_request("POST", "/api/v1/demo", &json!({"action":"mass"}), None),
+        json_request("PUT", "/api/v1/incidents", &json!([]), Some("Bearer wrong")),
+    ] {
+        let (status, _, body) = call(app(&vars), req).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "DEMO_UNAUTHORIZED");
+    }
+}
+
+#[tokio::test]
+async fn demo_routes_are_documented() {
+    let (_, _, spec) = call(app(&[]), get("/api/v1/openapi.json")).await;
+    assert!(spec["paths"]["/api/v1/demo"]["post"].is_object());
+    assert!(spec["paths"]["/api/v1/incidents"]["put"].is_object());
+    assert!(spec["components"]["schemas"]["DemoRequest"].is_object());
+}

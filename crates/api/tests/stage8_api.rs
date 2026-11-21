@@ -841,3 +841,125 @@ async fn openapi_lists_all_routes() {
     assert_eq!(spec["info"]["title"], api.e.settings.app_name.as_str());
     api.finish().await;
 }
+
+// ================================================================ демо-режим фронтенда
+
+async fn demo_send(api: &Api, method: &str, path: &str, body: &Value, auth: Option<&str>) -> Res {
+    let mut headers = vec![("Content-Type", "application/json")];
+    if let Some(value) = auth {
+        headers.push(("Authorization", value));
+    }
+    api.send(method, path, &headers, Body::from(body.to_string()))
+        .await
+}
+
+fn source_json(api: &Api) -> Value {
+    serde_json::from_slice(&std::fs::read(&api.e.source).unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn demo_routes_are_disabled_by_default() {
+    let api = api!();
+    let res = demo_send(&api, "POST", "/demo", &json!({"action":"deadline"}), None).await;
+    assert_eq!(res.status, 404);
+    let res = demo_send(&api, "PUT", "/incidents", &json!([]), None).await;
+    assert_eq!(res.status, 405);
+    assert_eq!(res.json()["code"], "METHOD_NOT_ALLOWED");
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn demo_import_replaces_the_source_and_scenarios_publish_new_revisions() {
+    let Some(mut api) = Api::with_vars(&[
+        ("DEMO_API_ENABLED", "true"),
+        ("ASSIGNMENT_TOKEN", "local-test"),
+    ])
+    .await
+    else {
+        return;
+    };
+    let bearer = Some("Bearer local-test");
+    let mut recs = records();
+    api.imported(&recs).await;
+    let first = api.json("/snapshot?view=web").await["revision"].as_i64().unwrap();
+
+    recs.truncate(5);
+    let body = Value::Array(recs.iter().cloned().map(Value::Object).collect());
+    assert_eq!(demo_send(&api, "PUT", "/incidents", &body, None).await.status, 401);
+    assert_eq!(
+        demo_send(&api, "PUT", "/incidents", &body, Some("Bearer other-key"))
+            .await
+            .status,
+        401
+    );
+
+    let res = demo_send(&api, "PUT", "/incidents", &body, bearer).await;
+    assert_eq!(res.status, 200, "{}", String::from_utf8_lossy(&res.raw));
+    let replaced = res.json();
+    let second = replaced["revision"].as_i64().unwrap();
+    assert!(second > first);
+    assert_eq!(replaced["items"].as_array().unwrap().len(), 5);
+    assert_eq!(source_json(&api), body);
+
+    let rejected = demo_send(&api, "PUT", "/incidents", &json!([{"id":"INC1"}]), bearer).await;
+    assert_eq!(rejected.status, 400);
+    assert_eq!(rejected.json()["code"], "SNAPSHOT_REJECTED");
+    assert_eq!(source_json(&api), body, "rejected payload must not touch the source");
+
+    let res = demo_send(&api, "POST", "/demo", &json!({"action":"mass"}), bearer).await;
+    assert_eq!(res.status, 200, "{}", String::from_utf8_lossy(&res.raw));
+    let mass = res.json();
+    assert!(mass["revision"].as_i64().unwrap() > second);
+    assert_eq!(mass["items"].as_array().unwrap().len(), 8);
+    assert_eq!(source_json(&api).as_array().unwrap().len(), 8);
+
+    let res = demo_send(&api, "POST", "/demo", &json!({"action":"deadline"}), bearer).await;
+    assert_eq!(res.status, 200, "{}", String::from_utf8_lossy(&res.raw));
+
+    let unknown = demo_send(&api, "POST", "/demo", &json!({"action":"explode"}), bearer).await;
+    assert_eq!(unknown.status, 400);
+    assert_eq!(unknown.json()["code"], "UNKNOWN_DEMO_ACTION");
+
+    let reset = demo_send(&api, "POST", "/demo", &json!({"action":"reset"}), bearer).await;
+    assert_eq!(reset.status, 409);
+    assert_eq!(reset.json()["code"], "DEMO_SEED_NOT_CONFIGURED");
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn demo_reset_restores_the_seed_without_a_token_when_none_is_configured() {
+    let seed = std::env::temp_dir().join(format!("demo_seed_{}.json", uuid_like()));
+    let mut recs = records();
+    recs.truncate(3);
+    let seed_body = Value::Array(recs.iter().cloned().map(Value::Object).collect());
+    std::fs::write(&seed, seed_body.to_string()).unwrap();
+    let seed_str = seed.to_string_lossy().into_owned();
+    let Some(mut api) = Api::with_vars(&[
+        ("DEMO_API_ENABLED", "true"),
+        ("DEMO_SEED_PATH", seed_str.as_str()),
+    ])
+    .await
+    else {
+        let _ = std::fs::remove_file(&seed);
+        return;
+    };
+    api.imported(&records()).await;
+    let res = demo_send(&api, "POST", "/demo", &json!({"action":"reset"}), None).await;
+    assert_eq!(res.status, 200, "{}", String::from_utf8_lossy(&res.raw));
+    assert_eq!(res.json()["items"].as_array().unwrap().len(), 3);
+    assert_eq!(source_json(&api), seed_body);
+    let _ = std::fs::remove_file(&seed);
+    api.finish().await;
+}
+
+fn uuid_like() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    format!(
+        "{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )
+}
