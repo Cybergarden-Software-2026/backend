@@ -33,12 +33,12 @@ COPY --from=planner /src/recipe.json recipe.json
 RUN cargo chef cook --release --locked --recipe-path recipe.json
 # SQL миграций встраивается в бинарник (include_str! в crates/store).
 COPY . ./
-RUN cargo build --release --locked --bin api --bin migrate --bin importer
+RUN cargo build --release --locked --bin api --bin migrate --bin importer --bin ai-worker
 
 # ---------- runtime ----------
 FROM ${RUNTIME_IMAGE} AS runtime
 COPY --from=builder /src/target/release/api /src/target/release/migrate \
-    /src/target/release/importer /usr/local/bin/
+    /src/target/release/importer /src/target/release/ai-worker /usr/local/bin/
 WORKDIR /app
 USER nonroot
 ENV API_HOST=0.0.0.0 API_PORT=8080

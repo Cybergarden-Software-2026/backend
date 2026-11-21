@@ -206,7 +206,6 @@ impl Worker {
     pub async fn run_loop(&self, mut stop: watch::Receiver<bool>, heartbeat: Option<&Path>) {
         let mut last_backfill: Option<Instant> = None;
         while !*stop.borrow() {
-            touch(heartbeat);
             if last_backfill.is_none_or(|t| t.elapsed() >= BACKFILL_INTERVAL) {
                 match self.backfill().await {
                     Ok(queued) => {
@@ -218,9 +217,16 @@ impl Worker {
                     Err(e) => tracing::warn!("Не удалось поставить задачи: {e}"),
                 }
             }
+            // Heartbeat — только после успешного обращения к очереди: без БД worker нездоров.
             let idle = match self.process_one(&mut stop).await {
-                Ok(Some(_)) => None,
-                Ok(None) => Some(self.settings.llm_poll_interval),
+                Ok(Some(_)) => {
+                    touch(heartbeat);
+                    None
+                }
+                Ok(None) => {
+                    touch(heartbeat);
+                    Some(self.settings.llm_poll_interval)
+                }
                 Err(e) => {
                     tracing::warn!("Ошибка БД в цикле ИИ-задач: {e}");
                     Some(self.settings.llm_poll_interval.max(Duration::from_secs(5)))

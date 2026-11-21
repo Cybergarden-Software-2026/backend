@@ -66,7 +66,18 @@ services:
     healthcheck:
       disable: true
 
-  # ИИ-модуль (ai-worker, Ollama) подключается отдельно и в этот compose не входит.
+  # Очередь ИИ-анализа (analysis_jobs) → локальная модель. При LLM_ENABLED=false простаивает
+  # и к модели не обращается. Каталог выгрузки ему не нужен, порты не публикуются.
+  ai-worker:
+    <<: *backend
+    command: ["/usr/local/bin/ai-worker"]
+    volumes: []
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ai-worker", "--healthcheck"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
 volumes:
   pgdata:

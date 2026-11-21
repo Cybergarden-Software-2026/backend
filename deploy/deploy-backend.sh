@@ -30,6 +30,28 @@ check_backend() {
     python3 -c 'import json,sys; s=json.load(sys.stdin); sys.exit(not (isinstance(s["items"],list) and s["source"]["status"]=="ok"))' 2>/dev/null
 }
 
+# Есть ли сервис ai-worker в установленном Compose (до обновления файлов в $config — нет).
+has_worker_service() {
+  compose "$1" config --services | grep -qx ai-worker
+}
+
+# Worker жив: контейнер запущен, а HEALTHCHECK (heartbeat цикла обработки) не unhealthy.
+check_worker() {
+  local id=$1 health
+  [[ -n "$id" && "$(docker container inspect --format '{{.State.Running}}' "$id")" == true ]] || return 1
+  health=$(docker container inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$id")
+  [[ "$health" == healthy ]]
+}
+
+wait_for_worker() {
+  local attempt
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    if check_worker "$(compose "$1" ps --quiet ai-worker)"; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+
 wait_for_backend() {
   local attempt
   for ((attempt = 0; attempt < 45; attempt++)); do
@@ -51,6 +73,12 @@ if [[ -z "$api" || -z "$importer" ]]; then
   echo 'Start the existing Compose deployment before enabling this service.' >&2
   exit 1
 fi
+worker_service=0
+worker=
+if has_worker_service "$image"; then
+  worker_service=1
+  worker=$(compose "$image" ps --all --quiet ai-worker)
+fi
 running_image=$(docker container inspect --format '{{.Image}}' "$api")
 importer_image=$(docker container inspect --format '{{.Image}}' "$importer")
 if [[ "$running_image" != "$importer_image" ]]; then
@@ -59,6 +87,10 @@ if [[ "$running_image" != "$importer_image" ]]; then
 fi
 if [[ "$(docker container inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$api")" == "$revision" &&
       "$(docker container inspect --format '{{.State.Running}}' "$importer")" == true ]] &&
+   { (( ! worker_service )) ||
+     [[ -n "$worker" &&
+        "$(docker container inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$worker")" == "$revision" ]] &&
+     check_worker "$worker"; } &&
    check_backend; then
   exit 0
 fi
@@ -77,6 +109,15 @@ cleanup() {
   trap - EXIT
   if (( status != 0 && switch_started )); then
     echo 'Deployment failed, restoring the previous API and importer images.' >&2
+    if (( worker_service )); then
+      if [[ -n "$worker" ]]; then
+        # Worker уже работал на прежнем образе — возвращается вместе с API и импортёром.
+        compose "$previous" up -d --no-build --no-deps ai-worker || true
+      else
+        # Первый выпуск с worker: в прежнем образе нет бинарника, worker останавливается.
+        compose "$previous" rm --force --stop ai-worker >/dev/null 2>&1 || true
+      fi
+    fi
     if compose "$previous" up -d --no-build --no-deps api importer &&
        wait_for_backend; then
       echo 'Previous containers passed readiness and snapshot checks.' >&2
@@ -144,10 +185,18 @@ fi
 docker image tag "$running_image" "$previous"
 compose "$image" run --rm --no-deps -T migrate
 switch_started=1
-compose "$image" up -d --no-build --no-deps api importer
+services=(api importer)
+if (( worker_service )); then
+  services+=(ai-worker)
+fi
+compose "$image" up -d --no-build --no-deps "${services[@]}"
 if ! wait_for_backend ||
    [[ "$(docker container inspect --format '{{.State.Running}}' "$(compose "$image" ps --quiet importer)")" != true ]]; then
   echo 'The new backend did not pass readiness and snapshot checks.' >&2
+  exit 1
+fi
+if (( worker_service )) && ! wait_for_worker "$image"; then
+  echo 'The new ai-worker did not become healthy.' >&2
   exit 1
 fi
 
