@@ -10,6 +10,8 @@
 
 mod analysis;
 pub mod assignments;
+pub mod coordinator_accounts;
+mod coordinator_session;
 pub mod dashboard;
 pub mod demo;
 pub mod docs;
@@ -30,6 +32,7 @@ use std::sync::{Arc, OnceLock};
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode, header};
+use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use chrono::{DateTime, Utc};
@@ -107,7 +110,7 @@ impl AppState {
 }
 
 /// Маршруты `/api/v1` (`app/api/v1/router.py`).
-fn api_v1() -> Router<AppState> {
+fn api_v1(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/snapshot", get(dashboard::snapshot))
         .route("/teams", get(assignments::teams))
@@ -137,6 +140,18 @@ fn api_v1() -> Router<AppState> {
             "/notifications/{notification_id}/read",
             put(notifications::mark_read),
         )
+        .route_layer(from_fn_with_state(state, coordinator_session::protect))
+        .merge(
+            Router::new()
+                .route(
+                    "/auth/coordinator/session",
+                    get(coordinator_session::get)
+                        .post(coordinator_session::login)
+                        .delete(coordinator_session::logout)
+                        .layer(DefaultBodyLimit::max(4096)),
+                )
+                .route_layer(from_fn(coordinator_session::auth_headers)),
+        )
         .route("/openapi.json", get(docs::openapi))
 }
 
@@ -144,7 +159,7 @@ pub fn router(state: AppState) -> Router {
     let cors = cors_layer(&state.settings);
     let mut app = Router::new()
         .merge(health::routes())
-        .nest("/api/v1", api_v1())
+        .nest("/api/v1", api_v1(state.clone()))
         .merge(docs::routes())
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
@@ -171,13 +186,15 @@ fn cors_layer(settings: &Settings) -> Option<CorsLayer> {
     let origins: Vec<HeaderValue> = settings
         .cors_origins
         .iter()
-        .filter_map(|o| match HeaderValue::from_str(o) {
-            Ok(v) => Some(v),
-            Err(_) => {
-                tracing::warn!(origin = %o, "ignoring invalid CORS origin");
-                None
-            }
-        })
+        .filter_map(
+            |o| match (coordinator_session::browser_origin(o), HeaderValue::from_str(o)) {
+                (Some(_), Ok(v)) => Some(v),
+                _ => {
+                    tracing::warn!(origin = %o, "ignoring invalid CORS origin");
+                    None
+                }
+            },
+        )
         .collect();
     Some(
         CorsLayer::new()
@@ -187,8 +204,10 @@ fn cors_layer(settings: &Settings) -> Option<CorsLayer> {
                 Method::POST,
                 Method::PUT,
                 Method::PATCH,
+                Method::DELETE,
                 Method::OPTIONS,
             ])
+            .allow_credentials(true)
             // allow_headers=["*"] в Starlette = отражение запрошенных заголовков.
             .allow_headers(AllowHeaders::mirror_request())
             .expose_headers([HeaderName::from_static(request_id::REQUEST_ID_HEADER)]),

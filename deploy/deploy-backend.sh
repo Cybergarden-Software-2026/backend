@@ -24,10 +24,9 @@ compose() {
 }
 
 check_backend() {
-  curl --noproxy '*' -fs --max-time 5 -o /dev/null \
-    http://127.0.0.1:8001/health/ready || return 1
-  curl --noproxy '*' -fs --max-time 5 http://127.0.0.1:8001/api/v1/snapshot |
-    python3 -c 'import json,sys; s=json.load(sys.stdin); sys.exit(not (isinstance(s["items"],list) and s["source"]["status"]=="ok"))' 2>/dev/null
+  local container
+  container=$(compose "$image" ps --quiet api) || return 1
+  [[ -n "$container" ]] && python3 "$config/check-backend.py" "$container"
 }
 
 # Есть ли сервис ai-worker в установленном Compose (до обновления файлов в $config — нет).

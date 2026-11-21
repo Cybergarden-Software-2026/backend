@@ -48,8 +48,7 @@ docker version && docker compose version
 sudo ufw allow 22,80,443/tcp && sudo ufw enable
 ```
 
-Python, Rust и PostgreSQL на сервер ставить не нужно. Python 3 нужен только для `tools/demo.py`
-(сценарий демонстрации), если его запускать на сервере.
+Rust и PostgreSQL на сервер ставить не нужно. Python 3 нужен для проверки снимка при автодеплое и для `tools/demo.py`, если запускать сценарий демонстрации на сервере.
 
 ## 3. Настройка перед первым запуском
 
@@ -96,7 +95,7 @@ docker compose logs -f importer         # «Снимок принят: revision=
 ## Запуск на vserver
 
 Для этого варианта используйте Docker Engine 28 или новее и Docker Compose
-2.24.4 или новее. Назначения обрабатывает API без ключа. Из корня репозитория с настроенным `.env` выполните:
+2.24.4 или новее. Из корня репозитория с настроенным `.env` выполните:
 
 ```bash
 dc() { sudo docker compose -f docker-compose.yml -f compose.vserver.yml "$@"; }
@@ -112,6 +111,45 @@ API слушает порт `8080` внутри контейнера и дост
 `127.0.0.1:8080` используется Qwen. В выводе `dc ps --all` ожидаются
 `Exited (0)` для миграции и `healthy` для API после запуска. Готовность
 проверяется ответом `"database":true` на `/health/ready`.
+
+### Личные учётки координаторов на vserver
+
+1. Выложите backend с `COORDINATOR_ACCOUNTS_ENABLED=false`, затем frontend с выбором способа входа. Установите обновлённую службу автодеплоя из слитого коммита по инструкции в следующем разделе. С установкой станет доступен скрипт подготовки учёток.
+2. После применения миграции `0006` запустите на vserver команду под своей учётной записью администратора. Скрипт сам использует `sudo` для Docker.
+
+   ```bash
+   /usr/local/sbin/underctrl-create-test-coordinators
+   ```
+
+   Скрипт создаёт `test-coordinator-1`, `test-coordinator-2` и `test-coordinator-3` и печатает путь к JSON с логинами, паролями и отдельными ключами. По умолчанию файл появляется в `$HOME/.local/state/underctrl/test-coordinators.json` с правами `0600`. Можно передать другой путь первым аргументом. Скрипт сохраняет существующие учётки и файлы с ранее выданными данными.
+3. Откройте `sudoedit /home/cyber/cybergarden/backend/.env`. Установите `COORDINATOR_ACCOUNTS_ENABLED=true`. В `CORS_ORIGINS` добавьте `https://cybergarden.sosmooth.ru`, сохранив остальные нужные адреса. Режим личных учёток проверяет личные пароли и ключи.
+4. Пересоздайте `api`, чтобы Docker применил `.env`. Для установленного автодеплоя используйте блок ниже. При ручном управлении используйте функцию `dc` из предыдущего раздела и команду `dc up -d --no-build --no-deps --force-recreate api`.
+
+```bash
+sudo flock -n /run/lock/underctrl-backend-deploy.lock bash -euo pipefail <<'RECREATE_API'
+repo=/home/cyber/cybergarden/backend
+config=/etc/underctrl-backend-deploy
+api_container=$(docker ps -q --filter label=com.docker.compose.project=mts-incident-dashboard \
+  --filter label=com.docker.compose.service=api)
+test -n "$api_container"
+api_image=$(docker container inspect --format '{{.Config.Image}}' "$api_container")
+UNDERCTRL_BACKEND_IMAGE="$api_image" docker compose \
+  --project-name mts-incident-dashboard --project-directory "$repo" --env-file "$repo/.env" \
+  -f "$config/docker-compose.yml" -f "$config/compose.vserver.yml" -f "$config/compose.image.yml" \
+  up -d --no-build --no-deps --force-recreate api
+RECREATE_API
+```
+
+После запуска откройте сайт по HTTPS и проверьте ответы без браузерной сессии.
+
+```bash
+curl -fsS https://cybergarden.sosmooth.ru/api/v1/auth/coordinator/session
+curl -sS -o /dev/null -w '%{http_code}\n' 'https://cybergarden.sosmooth.ru/api/v1/snapshot?view=web'
+```
+
+Первый запрос должен вернуть `required: true` и `mode: "accounts"`, второй — `401`. На сайте выберите «Логин и пароль» или вход по личному ключу и используйте данные одной из тестовых учёток. Фронтенд использует существующий прокси `/api/v1`. Cookie привязана к HTTPS-хосту, через который координатор выполнил вход.
+
+Для новой рабочей учётки оператор может запустить команду `api coordinator create LOGIN [DISPLAY_NAME]` внутри контейнера `api` через `sudo docker exec`. Сохраните стандартный вывод в новый файл с `umask 077` и включённым `set -o noclobber`. Для отключения учётки и отзыва её сессий используйте `api coordinator disable LOGIN` через тот же контейнер.
 
 ## Автодеплой из main на vserver
 
@@ -152,7 +190,7 @@ GitHub Actions проверяет PR в `main` и push в `main`. На серв�
 sudo journalctl -u underctrl-backend-deploy.service -n 80 --no-pager
 ```
 
-При изменении самой конфигурации Compose повторите установку файлов
+При изменении конфигурации Compose или скриптов автодеплоя повторите установку файлов
 из проверенного коммита `main`. Автоматический цикл использует параметры
 Compose, установленные владельцем сервера в `/etc/underctrl-backend-deploy`.
 

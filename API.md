@@ -8,11 +8,13 @@ Status reflects the committed implementation in the owning repository. Productio
 
 | Capability | Owning repository | Status |
 |---|---|---|
+| `GET/POST/DELETE /api/v1/auth/coordinator/session` and protected dashboard routes | `backend` and `frontend-web` | Implemented (enabled by configuration) |
+| Personal coordinator accounts with password and individual key, plus assignment attribution | `backend` and `frontend-web` | Implemented (enabled by `COORDINATOR_ACCOUNTS_ENABLED`) |
 | `GET /api/v1/snapshot` and `GET /api/v1/dashboard` | `backend` | Implemented |
 | `GET /api/v1/incidents` with page and cursor pagination, and `GET /api/v1/incidents/{key}?view=web` | `backend` | Implemented |
 | `GET /api/v1/teams` and rules-based `GET /api/v1/incidents/{key}/analysis` | `backend` | Implemented |
 | LLM summary and team suggestion in `GET /api/v1/incidents/{key}/analysis` (`provider: "llm"`, background `ai-worker`, `LLM_ENABLED`) | `backend` | Implemented (verified with a mock model; enabled per deployment) |
-| Keyless `POST /api/v1/incidents/{sysId}/assignment` | `backend` and `frontend-web` | Implemented |
+| `POST /api/v1/incidents/{sysId}/assignment` with revision checking | `backend` and `frontend-web` | Implemented |
 | `GET /api/v1/events`, `GET /api/v1/events/stream`, and `GET /api/v1/incidents/{key}/events` | `backend` | Implemented |
 | `GET /api/v1/notifications` and `PUT /api/v1/notifications/{notification_id}/read` | `backend` | Implemented |
 | `GET /api/v1/openapi.json`, `GET /api/docs`, `GET /redoc`, and `GET /docs/oauth2-redirect` | `backend` | Implemented |
@@ -22,7 +24,7 @@ Status reflects the committed implementation in the owning repository. Productio
 | Shared mass-problem membership and exclusions via `GET/PATCH /api/v1/problems/clusters` | `backend` | Implemented |
 | LLM review of automatic mass-problem groups (title and reason in `GET/PATCH /api/v1/problems/clusters`) | `backend` | Implemented (verified with a mock model; enabled per deployment) |
 | Shift PDF/Excel export and sequential group assignment | `frontend-web` | Implemented |
-| Atomic bulk team assignment and individual coordinator attribution | `backend` | Not implemented |
+| Atomic bulk team assignment and per-coordinator shift statistics | `backend` | Not implemented |
 | Same-origin `/api` proxy and `GET /healthz` | `frontend-web` | Implemented |
 | `POST /api/v1/demo` and `PUT /api/v1/incidents` | `backend` | Implemented (isolated demo only) |
 
@@ -47,7 +49,23 @@ For a standard local Docker Compose deployment, the backend base URL is `http://
 | View analysis | `GET /incidents/{key}/analysis` | Facts, items requiring attention, and candidate teams |
 | Assign a team | `POST /incidents/{sysId}/assignment` | Full snapshot after the operation |
 
-The dashboard, reads, SSE subscriptions, assignments and group edits are available without login. Anyone who can reach this deployment can read the data and perform these writes.
+The command examples below use a local instance without authentication. When coordinator access is configured, call protected routes with the coordinator session cookie over HTTPS.
+
+### Coordinator access
+
+With `COORDINATOR_ACCOUNTS_ENABLED=true`, the Rust API requires an active coordinator account. The administrator provisions accounts on the backend. Each account has a login, password and separate key. The frontend shows both sign-in methods. The backend verifies credentials and stores only password verifiers and key digests. There is no public registration endpoint.
+
+| Method on `/api/v1/auth/coordinator/session` | Request and response |
+|---|---|
+| `GET` | Returns `200` with `required` and `authenticated`. In accounts mode it includes `mode: "accounts"`. An authenticated account response includes `coordinator: { "login": "test-coordinator-1", "displayName": "Тестовый координатор 1" }`. |
+| `POST` | Accepts one of `{ "login": "test-coordinator-1", "password": "<password>", "remember": false }` or `{ "key": "<personal key>", "remember": false }`. Returns the authenticated session status and sets a cookie. Invalid credentials or a disabled account return `401`. |
+| `DELETE` | Invalidates the current session, clears the cookie and returns `204`. |
+
+Accounts mode requires a session even when no accounts have been created. It accepts only personal credentials and account sessions. With accounts mode disabled, the legacy `COORDINATOR_ACCESS_KEY` setting can still require shared-key authentication. If neither mode is configured, `GET` and `POST` return `200` with `required: false` and `authenticated: false`, and dashboard routes are open during rollout. `DELETE` returns `204` in each mode.
+
+The API issues a host-only `__Host-underctrl-coordinator` cookie with `Secure`, `HttpOnly`, `SameSite=Strict`, and `Path=/`. The default session expires after 12 hours on the server and uses a browser session cookie. Selecting **Remember this device** issues a cookie and session valid for seven days. The browser sends the cookie on normal same-origin requests, including SSE. For cross-origin requests within the same site, add the HTTPS frontend origin to `CORS_ORIGINS` and send credentials on both `fetch` and `EventSource`.
+
+The API returns `401` for protected routes without a valid session and `403` for writes from a disallowed browser origin. Protection covers dashboard data, the queue, incident details and history, the team directory, analysis, notifications, statistics, SSE, team assignments and group edits. Authenticated data and session responses specify `Cache-Control: no-store`. The server rechecks access before sending each SSE update or heartbeat, so disabling an account also stops access through its open streams. Health and API documentation are available without a session.
 
 ## 1. Get a snapshot and find incident identifiers
 
@@ -134,7 +152,7 @@ curl -fsS "$API/teams" | jq '.items[] | {name, activeCount}'
 curl -fsS "$API/incidents/$SYS_ID/analysis" | jq '{summary, attention, candidates, missing}'
 ```
 
-**Assignment.** `POST /incidents/{sysId}/assignment` requires the incident's `sysId`. The JSON body contains the chosen team name and the snapshot revision the coordinator saw. Send the JSON body without credentials.
+**Assignment.** `POST /incidents/{sysId}/assignment` requires the incident's `sysId`. The JSON body contains the chosen team name and the snapshot revision the coordinator saw. Send the coordinator session cookie if authentication is enabled. In accounts mode the assignment event records the authenticated login as the actor.
 
 ```json
 {"team":"Storage Operations","expectedRevision":12}
@@ -229,7 +247,7 @@ History and notification lists return records newest first. `limit` defaults to 
 
 A history event contains `eventId`, `revision`, `incidentRevision`, `sysId`, `incidentId`, `header`, `at`, the arrays `types` and `fields`, and the source records `previous` and `current`, each of which may be `null`. One event can have multiple types. The `type` filter accepts one of `created`, `critical`, `assigned`, `resolved`, `closed`, `reopened`, `research`, `deadline`, `team`, `priority`, `changed`, or `removed`. SSE subscription cursors track snapshot revisions. History cursors track individual events.
 
-Both notification routes accept `X-User-Id` to maintain read state per user. It allows 1–64 characters from `A–Z`, `a–z`, `0–9`, `_`, `.`, `@`, and `-`. If omitted, the server uses `DEFAULT_USER_ID`, typically `coordinator`.
+In accounts mode the authenticated login determines notification read state. In the open and legacy shared-key modes both notification routes accept `X-User-Id`. It allows 1–64 characters from `A–Z`, `a–z`, `0–9`, `_`, `.`, `@`, and `-`. If omitted, the server uses `DEFAULT_USER_ID`, typically `coordinator`.
 
 ```bash
 curl -fsSG "$API/events" --data-urlencode "incidentSysId=$SYS_ID" --data-urlencode 'limit=10'

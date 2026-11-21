@@ -4,6 +4,7 @@
 //! Порядок проверок как в Python: ошибки параметров (FastAPI, 400) → «первый снимок ещё не
 //! принят» (503) → ошибки сервиса (404, 400 `INVALID_SORT`/`INVALID_CURSOR`, 409).
 
+use axum::Extension;
 use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, Uri};
 use axum::response::{IntoResponse, Response};
@@ -20,6 +21,7 @@ use serde_json::{Map, Value, json};
 use sqlx::{PgConnection, Postgres, Transaction};
 
 use crate::AppState;
+use crate::coordinator_session::ActiveSession;
 use crate::error::{ApiResult, AppError};
 use crate::params::{self, Params};
 use crate::response::PyJson;
@@ -327,9 +329,10 @@ async fn events(state: &AppState, r: EventsRequest) -> ApiResult<Value> {
     }))
 }
 
-pub async fn list_events(
+pub(crate) async fn list_events(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
+    session: Option<Extension<ActiveSession>>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     let mut p = Params::new(&uri);
@@ -349,7 +352,13 @@ pub async fn list_events(
         // опрос журнала не запускает.
         let broadcaster = state.broadcaster();
         let cursor = stream_cursor(last_event_id, since);
-        return Ok(sse::notify_stream(&broadcaster, cursor, state.settings.sse_heartbeat).into_response());
+        return Ok(sse::notify_stream_with_session(
+            &broadcaster,
+            cursor,
+            state.settings.sse_heartbeat,
+            session.map(|Extension(session)| session),
+        )
+        .into_response());
     }
     let request = EventsRequest {
         after_id,
@@ -371,9 +380,10 @@ fn stream_cursor(last_event_id: Option<String>, since: Option<String>) -> Option
 
 pub const STREAM_MODES: &[&str] = &["snapshot", "notify"];
 
-pub async fn stream_events(
+pub(crate) async fn stream_events(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
+    session: Option<Extension<ActiveSession>>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     // Зависимость get_broadcaster FastAPI выполняет раньше проверки параметров.
@@ -385,10 +395,16 @@ pub async fn stream_events(
     let last_event_id = p.header_str(&headers, "Last-Event-ID", 32);
     p.finish()?;
     let heartbeat = state.settings.sse_heartbeat;
+    let session = session.map(|Extension(session)| session);
     let stream = if mode == "notify" {
-        sse::notify_stream(&broadcaster, stream_cursor(last_event_id, since), heartbeat)
+        sse::notify_stream_with_session(
+            &broadcaster,
+            stream_cursor(last_event_id, since),
+            heartbeat,
+            session,
+        )
     } else {
-        sse::snapshot_stream_with_view(&broadcaster, heartbeat, web)
+        sse::snapshot_stream_with_view(&broadcaster, heartbeat, web, session)
     };
     Ok(stream.into_response())
 }

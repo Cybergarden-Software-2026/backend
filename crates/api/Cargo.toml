@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+argon2 = "0.5"
 futures-core = "0.3"
 dashboard-config.workspace = true
 dashboard-store.workspace = true
@@ -16,10 +17,14 @@ dashboard-domain.workspace = true
 dashboard-importer.workspace = true
 chrono.workspace = true
 form_urlencoded = "1.2"
+getrandom = "0.4"
+hex.workspace = true
 axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
+subtle = "2.6"
 tokio.workspace = true
 tower.workspace = true
 tower-http.workspace = true
@@ -28,8 +33,6 @@ unicode-properties = { version = "0.1", default-features = false, features = ["g
 uuid.workspace = true
 
 [dev-dependencies]
-sha2.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
-hex.workspace = true
 http-body-util.workspace = true
 tower = { workspace = true, features = ["util"] }

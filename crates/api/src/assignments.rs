@@ -1,9 +1,11 @@
+use axum::Extension;
 use axum::extract::{Json, OriginalUri, State, rejection::JsonRejection};
 use dashboard_importer::assignment;
 use dashboard_store::{import_repo, read_repo};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::coordinator_accounts::Coordinator;
 use crate::dashboard::{load, load_in_tx, path_key, snapshot_value};
 use crate::params::Params;
 use crate::response::PyJson;
@@ -30,9 +32,10 @@ pub struct Assignment {
     expected_revision: i64,
 }
 
-pub async fn assign(
+pub(crate) async fn assign(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
+    coordinator: Option<Extension<Coordinator>>,
     body: Result<Json<Assignment>, JsonRejection>,
 ) -> ApiResult<PyJson> {
     let Json(input) =
@@ -71,13 +74,18 @@ pub async fn assign(
         return Err(AppError::bad_request("Выберите команду из справочника."));
     }
     if row.assigned_group_name.as_deref() != Some(&input.team) {
+        let actor = coordinator
+            .as_ref()
+            .map_or(state.settings.default_user_id.as_str(), |value| {
+                value.login.as_str()
+            });
         assignment::record_assignment(
             &mut tx,
             &state.settings,
             &row,
             &input.team,
             (state.clock)(),
-            &state.settings.default_user_id,
+            actor,
         )
         .await?;
     }
