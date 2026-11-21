@@ -2,7 +2,6 @@ target/
 .git/
 .env
 **/.DS_Store
-**/tests/fixtures/
 data/
 docs/
 tools/

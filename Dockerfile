@@ -12,6 +12,13 @@
 ARG RUST_IMAGE=rust:1-slim-trixie
 ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot
 
+# ---------- тесты: PostgreSQL подключается при запуске контейнера ----------
+FROM ${RUST_IMAGE} AS test
+WORKDIR /src
+COPY . ./
+RUN cargo test --workspace --locked --no-run
+CMD ["cargo", "test", "--workspace", "--locked", "--offline"]
+
 # ---------- cargo-chef: кэш зависимостей отдельным слоем ----------
 FROM ${RUST_IMAGE} AS chef
 RUN cargo install cargo-chef --locked
