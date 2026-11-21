@@ -159,7 +159,7 @@ On `409` with `currentRevision`, fetch the snapshot again, display the current t
 
 ### Mass-problem workspace
 
-`GET /api/v1/problems/clusters` returns `{revision, items, exclusions}`. Each group in `items` has `id`, `title`, `reason`, `sysIds` and `incidentIds`. Candidates are inferred from service/symptom similarity and registration time. Manual membership and exclusions are shared in PostgreSQL. Exclusion records include `sysId`, `incidentId`, `header`, `groupTitle`, `contextKey`, and `excludedAt` (Unix milliseconds). A service, title or registration-time change sends the affected incident back through automatic grouping.
+`GET /api/v1/problems/clusters` returns `{revision, items, exclusions}`. Each group in `items` has `id`, `title`, `reason`, `sysIds` and `incidentIds`. Candidates are inferred from registration within 24 hours plus one of: the same service, similar header symptoms, or the same product and usage scenario with a similar problem description (header, short and full description). The same product alone is never enough. Manual membership and exclusions are shared in PostgreSQL. Exclusion records include `sysId`, `incidentId`, `header`, `groupTitle`, `contextKey`, and `excludedAt` (Unix milliseconds). A service, title or registration-time change sends the affected incident back through automatic grouping.
 
 Send one operation to `PATCH /api/v1/problems/clusters` using the current `revision` from GET as `expectedRevision`:
 

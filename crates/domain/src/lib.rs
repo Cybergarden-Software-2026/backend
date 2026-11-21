@@ -16,6 +16,7 @@ pub mod cursors;
 pub mod grouping;
 pub mod incident_query;
 pub mod llm;
+pub mod mass_problems;
 pub mod normalizer;
 pub mod notification_rules;
 pub mod projection;

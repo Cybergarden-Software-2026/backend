@@ -205,3 +205,49 @@ async fn curation_survives_a_new_router_and_import_and_checks_stale_revisions() 
     assert_eq!(changed["items"][0]["sysIds"], json!(["d", "e"]));
     env.finish().await;
 }
+
+#[tokio::test]
+async fn same_product_and_scenario_need_a_similar_description() {
+    let Some(mut env) = Env::new().await else { return };
+    let date = "2026-11-19T12:00:00Z";
+    let mut records = with_incidents(&[
+        ("a", "Кассы магазин 1", "Нет печати", date, "Assigned"),
+        ("b", "Кассы магазин 2", "Не печатает", date, "Assigned"),
+        ("c", "Кассы магазин 3", "Медленно", date, "Assigned"),
+        ("d", "Кассы магазин 4", "Тоже касса", date, "Assigned"),
+        ("e", "Кассы магазин 5", "Похоже, но", date, "Assigned"),
+    ]);
+    let set = |record: &mut Record, product: &str, scenario: &str, description: &str| {
+        update(
+            record,
+            &[
+                ("productName", s(product)),
+                ("scenarioName", s(scenario)),
+                ("shortDescription", Value::Null),
+                ("description", s(description)),
+            ],
+        );
+    };
+    let receipts = "Кассовые терминалы магазина перестали печатать фискальные чеки покупателям";
+    set(&mut records[0], "Розница", "Печать чека", receipts);
+    set(&mut records[1], "Розница", "Печать чека", "Терминалы магазина перестали печатать фискальные чеки после обновления");
+    // Тот же продукт и сценарий, но другое описание.
+    set(&mut records[2], "Розница", "Печать чека", "Долго открывается отчёт смены у администратора");
+    // То же описание, но другой сценарий.
+    set(&mut records[3], "Розница", "Оплата картой", receipts);
+    // Тот же сценарий, но другой продукт.
+    set(&mut records[4], "Склад", "Печать чека", receipts);
+    import(&mut env, &records).await;
+    let groups = get(&api(&env)).await;
+    assert_eq!(
+        groups["items"],
+        json!([{
+            "id": "a-b",
+            "title": "Розница: Печать чека",
+            "reason": "Один продукт и сценарий, похожее описание проблемы; регистрации в пределах 24 часов",
+            "sysIds": ["a", "b"],
+            "incidentIds": ["INC-a", "INC-b"],
+        }])
+    );
+    env.finish().await;
+}
