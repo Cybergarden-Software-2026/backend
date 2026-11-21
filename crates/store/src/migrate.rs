@@ -48,6 +48,12 @@ pub const MIGRATIONS: &[SharedMigration] = &[
         description: "dashboard assignments",
         sql: include_str!("../../../migrations/0002_assignments_up.sql"),
     },
+    SharedMigration {
+        version: 3,
+        alembic_revision: "0003",
+        description: "shared mass problems workspace",
+        sql: include_str!("../../../migrations/0003_mass_problems_up.sql"),
+    },
 ];
 
 /// Ключ advisory lock миграций («MTS» + 2), чтобы два процесса `migrate` не синхронизировали

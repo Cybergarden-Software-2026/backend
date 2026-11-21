@@ -223,6 +223,7 @@ pub(crate) fn path_key(p: &mut Params, uri: &Uri) -> Option<String> {
 pub async fn get_incident(State(state): State<AppState>, OriginalUri(uri): OriginalUri) -> ApiResult<PyJson> {
     let mut p = Params::new(&uri);
     let key = path_key(&mut p, &uri);
+    let web = p.query_raw("view") == Some("web");
     p.finish()?;
     let key = key.unwrap_or_default();
 
@@ -239,8 +240,13 @@ pub async fn get_incident(State(state): State<AppState>, OriginalUri(uri): Origi
         Vec::new()
     };
     let projection = project_incident(&row, &ctx, groups);
+    let incident = if web {
+        proj::web_incident_item(&projection)
+    } else {
+        proj::incident_item(&projection)
+    };
     Ok(PyJson(json!({
-        "incident": proj::incident_item(&projection),
+        "incident": incident,
         "revision": loaded.revision,
         "normalizedState": projection.state().as_str(),
         "details": proj::incident_detail(&projection),

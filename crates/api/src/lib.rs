@@ -15,11 +15,13 @@ pub mod demo;
 pub mod docs;
 pub mod error;
 pub mod health;
+mod mass_problems;
 pub mod notifications;
 pub mod params;
 pub mod request_id;
 pub mod response;
 pub mod sse;
+mod statistics;
 mod web_queue;
 
 use std::any::Any;
@@ -111,6 +113,11 @@ fn api_v1() -> Router<AppState> {
         .route("/teams", get(assignments::teams))
         .route("/incidents/{key}/assignment", post(assignments::assign))
         .route("/dashboard", get(dashboard::dashboard))
+        .route("/statistics/shift", get(statistics::shift))
+        .route(
+            "/problems/clusters",
+            get(mass_problems::list).patch(mass_problems::update),
+        )
         .route(
             "/incidents",
             get(dashboard::list_incidents)
@@ -175,7 +182,13 @@ fn cors_layer(settings: &Settings) -> Option<CorsLayer> {
     Some(
         CorsLayer::new()
             .allow_origin(origins)
-            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::OPTIONS,
+            ])
             // allow_headers=["*"] в Starlette = отражение запрошенных заголовков.
             .allow_headers(AllowHeaders::mirror_request())
             .expose_headers([HeaderName::from_static(request_id::REQUEST_ID_HEADER)]),
@@ -190,6 +203,8 @@ const ROUTE_PATTERNS: &[&str] = &[
     "/api/v1/teams",
     "/api/v1/incidents/*/assignment",
     "/api/v1/dashboard",
+    "/api/v1/statistics/shift",
+    "/api/v1/problems/clusters",
     "/api/v1/incidents",
     "/api/v1/demo",
     "/api/v1/incidents/*",

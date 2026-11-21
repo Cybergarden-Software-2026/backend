@@ -384,14 +384,8 @@
           "demo"
         ],
         "summary": "Заменить тестовую выгрузку",
-        "description": "Проверяет массив инцидентов, атомарно записывает его в JSON_SOURCE_PATH и сразу импортирует. Отклонённая выгрузка источник не меняет. Доступно только при DEMO_API_ENABLED=true; если задан ASSIGNMENT_TOKEN, нужен ключ координатора.",
+        "description": "Проверяет массив инцидентов, атомарно записывает его в JSON_SOURCE_PATH и сразу импортирует. Отклонённая выгрузка источник не меняет. Доступно только при DEMO_API_ENABLED=true.",
         "operationId": "demo_replace_incidents",
-        "security": [
-          {},
-          {
-            "CoordinatorKey": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -418,16 +412,6 @@
           },
           "400": {
             "description": "Выгрузка не прошла проверку (SNAPSHOT_REJECTED)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Требуется ключ координатора",
             "content": {
               "application/json": {
                 "schema": {
@@ -475,14 +459,8 @@
           "demo"
         ],
         "summary": "Выполнить демо-сценарий",
-        "description": "Меняет тестовую выгрузку по сценарию кнопок «Симуляция»; reset восстанавливает файл DEMO_SEED_PATH. Доступно только при DEMO_API_ENABLED=true; если задан ASSIGNMENT_TOKEN, нужен ключ координатора.",
+        "description": "Меняет тестовую выгрузку по сценарию кнопок «Симуляция»; reset восстанавливает файл DEMO_SEED_PATH. Доступно только при DEMO_API_ENABLED=true.",
         "operationId": "demo_simulate",
-        "security": [
-          {},
-          {
-            "CoordinatorKey": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -506,16 +484,6 @@
           },
           "400": {
             "description": "Неизвестный сценарий или выгрузка не прошла проверку",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Требуется ключ координатора",
             "content": {
               "application/json": {
                 "schema": {
@@ -568,6 +536,18 @@
               "title": "Key"
             },
             "description": "`sysId` (API.md) или номер `id` вида INC…"
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "description": "В режиме web объект incident.dashboard.sourceDates содержит нормализованные даты UTC.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "web"
+              ]
+            }
           }
         ],
         "responses": {
@@ -1221,11 +1201,6 @@
       "post": {
         "summary": "Назначить команду по sysId",
         "operationId": "web_assign_team",
-        "security": [
-          {
-            "CoordinatorKey": []
-          }
-        ],
         "parameters": [
           {
             "name": "key",
@@ -1269,26 +1244,6 @@
               }
             }
           },
-          "401": {
-            "description": "Требуется ключ координатора",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Назначения отключены",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "404": {
             "description": "Инцидент отсутствует",
             "content": {
@@ -1311,6 +1266,150 @@
           },
           "503": {
             "description": "Ожидается первый снимок",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/statistics/shift": {
+      "get": {
+        "summary": "Статистика смены по назначениям",
+        "description": "Учитывает сохранённые назначения команд через underCtrl. Начало периода включено, конец исключён. Даты и длительности в ответе представлены миллисекундами. Неизвестная длительность не входит в среднее и KPI. KPI выполнен при длительности строго меньше десяти минут.",
+        "operationId": "get_shift_statistics",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Общая статистика за период",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShiftStatistics"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректный период",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/problems/clusters": {
+      "get": {
+        "summary": "Общие группы массовых проблем",
+        "operationId": "get_mass_problem_workspace",
+        "responses": {
+          "200": {
+            "description": "Группы, исключения и общая ревизия снимка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MassProblemWorkspace"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Первый снимок ещё не принят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "summary": "Изменить состав групп массовых проблем",
+        "description": "Добавляет участников группы, исключает инцидент или восстанавливает его. Передаётся текущая revision. Фиксация изменения повышает ревизию снимка и публикует обновление SSE.",
+        "operationId": "update_mass_problem_workspace",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MassProblemEdit"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Актуальные группы и исключения",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MassProblemWorkspace"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректная операция или данные",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Группа или инцидент не найдены",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Ревизия изменилась. Перечитайте состояние и передайте актуальную ревизию.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Первый снимок ещё не принят",
             "content": {
               "application/json": {
                 "schema": {
@@ -3402,13 +3501,304 @@
         "required": [
           "action"
         ]
-      }
-    },
-    "securitySchemes": {
-      "CoordinatorKey": {
-        "type": "http",
-        "scheme": "bearer",
-        "description": "Ключ для назначения команд, заданный на сервере в ASSIGNMENT_TOKEN."
+      },
+      "MassProblemCluster": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "reason",
+          "sysIds",
+          "incidentIds"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "sysIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "incidentIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "MassProblemExclusion": {
+        "type": "object",
+        "required": [
+          "sysId",
+          "incidentId",
+          "header",
+          "groupTitle",
+          "contextKey",
+          "excludedAt"
+        ],
+        "properties": {
+          "sysId": {
+            "type": "string"
+          },
+          "incidentId": {
+            "type": "string"
+          },
+          "header": {
+            "type": "string"
+          },
+          "groupTitle": {
+            "type": "string"
+          },
+          "contextKey": {
+            "type": "string"
+          },
+          "excludedAt": {
+            "type": "integer"
+          }
+        }
+      },
+      "MassProblemWorkspace": {
+        "type": "object",
+        "required": [
+          "revision",
+          "items",
+          "exclusions"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MassProblemCluster"
+            }
+          },
+          "exclusions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MassProblemExclusion"
+            }
+          }
+        }
+      },
+      "MassProblemEdit": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "expectedRevision",
+              "action",
+              "groupId",
+              "sysIds"
+            ],
+            "properties": {
+              "expectedRevision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "action": {
+                "type": "string",
+                "const": "add"
+              },
+              "groupId": {
+                "type": "string"
+              },
+              "sysIds": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "expectedRevision",
+              "action",
+              "groupId",
+              "sysId"
+            ],
+            "properties": {
+              "expectedRevision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "action": {
+                "type": "string",
+                "const": "exclude"
+              },
+              "groupId": {
+                "type": "string"
+              },
+              "sysId": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "expectedRevision",
+              "action",
+              "sysId"
+            ],
+            "properties": {
+              "expectedRevision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "action": {
+                "type": "string",
+                "const": "restore"
+              },
+              "sysId": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "ShiftAssignment": {
+        "type": "object",
+        "required": [
+          "id",
+          "coordinatorId",
+          "incidentId",
+          "title",
+          "team",
+          "priorityId",
+          "waitingStartedAt",
+          "assignedAt",
+          "durationMs",
+          "kpiMet"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "coordinatorId": {
+            "type": "string"
+          },
+          "incidentId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "team": {
+            "type": "string"
+          },
+          "priorityId": {
+            "type": "integer"
+          },
+          "waitingStartedAt": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "assignedAt": {
+            "type": "integer"
+          },
+          "durationMs": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kpiMet": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "ShiftStatistics": {
+        "type": "object",
+        "required": [
+          "source",
+          "coordinator",
+          "start",
+          "end",
+          "transferred",
+          "critical",
+          "averageMs",
+          "measured",
+          "kpiMet",
+          "kpiPercent",
+          "transfers"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "const": "api"
+          },
+          "coordinator": {
+            "type": "object",
+            "required": [
+              "id",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          },
+          "start": {
+            "type": "integer"
+          },
+          "end": {
+            "type": "integer"
+          },
+          "transferred": {
+            "type": "integer"
+          },
+          "critical": {
+            "type": "integer"
+          },
+          "averageMs": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "measured": {
+            "type": "integer"
+          },
+          "kpiMet": {
+            "type": "integer"
+          },
+          "kpiPercent": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "transfers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ShiftAssignment"
+            }
+          }
+        }
       }
     }
   }

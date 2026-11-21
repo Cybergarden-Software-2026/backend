@@ -189,6 +189,7 @@ str_enum! {
         Source = "source",
         Expiry = "expiry",
         Assignment = "assignment",
+        MassProblems = "mass_problems",
     }
 }
 

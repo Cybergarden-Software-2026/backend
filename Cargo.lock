@@ -333,11 +333,11 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
- "subtle",
  "tokio",
  "tower",
  "tower-http 0.7.1",
  "tracing",
+ "unicode-properties",
  "uuid",
 ]
 
