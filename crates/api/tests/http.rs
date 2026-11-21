@@ -36,6 +36,23 @@ fn get(uri: &str) -> Request<Body> {
 }
 
 #[tokio::test]
+async fn web_contract_is_documented() {
+    let (status, _, spec) = call(app(&[]), get("/api/v1/openapi.json")).await;
+    assert_eq!(status, StatusCode::OK);
+    let paths = &spec["paths"];
+    let queue = &paths["/api/v1/incidents"]["get"];
+    let params = queue["parameters"].as_array().unwrap();
+    for name in [
+        "page", "pageSize", "group", "priority", "status", "sla", "limit", "cursor",
+    ] {
+        assert!(params.iter().any(|param| param["name"] == name), "{name}");
+    }
+    assert!(paths["/api/v1/incidents/{key}/analysis"]["get"].is_object());
+    assert!(spec["components"]["schemas"]["QueuePage"]["properties"]["totalPages"].is_object());
+    assert!(spec["components"]["schemas"]["IncidentAnalysis"]["properties"]["candidates"].is_object());
+}
+
+#[tokio::test]
 async fn health_is_ok_without_database() {
     let (status, headers, body) = call(app(&[]), get("/health")).await;
     assert_eq!(status, StatusCode::OK);

@@ -7,6 +7,8 @@
 //! * R6: SSE (`/events/stream`, `/events?since=…`) — [`sse`]: broadcaster и режимы
 //!   `snapshot`/`notify`.
 
+mod analysis;
+pub mod assignments;
 pub mod dashboard;
 pub mod docs;
 pub mod error;
@@ -16,6 +18,7 @@ pub mod params;
 pub mod request_id;
 pub mod response;
 pub mod sse;
+mod web_queue;
 
 use std::any::Any;
 use std::sync::{Arc, OnceLock};
@@ -24,7 +27,7 @@ use axum::Router;
 use axum::extract::Request;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use chrono::{DateTime, Utc};
 use dashboard_config::Settings;
 use sqlx::PgPool;
@@ -103,10 +106,13 @@ impl AppState {
 fn api_v1() -> Router<AppState> {
     Router::new()
         .route("/snapshot", get(dashboard::snapshot))
+        .route("/teams", get(assignments::teams))
+        .route("/incidents/{key}/assignment", post(assignments::assign))
         .route("/dashboard", get(dashboard::dashboard))
         .route("/incidents", get(dashboard::list_incidents))
         .route("/incidents/{key}", get(dashboard::get_incident))
         .route("/incidents/{key}/events", get(dashboard::get_incident_events))
+        .route("/incidents/{key}/analysis", get(analysis::get))
         .route("/events", get(dashboard::list_events))
         .route("/events/stream", get(dashboard::stream_events))
         .route("/notifications", get(notifications::list_notifications))
@@ -171,10 +177,13 @@ const ROUTE_PATTERNS: &[&str] = &[
     "/health",
     "/health/ready",
     "/api/v1/snapshot",
+    "/api/v1/teams",
+    "/api/v1/incidents/*/assignment",
     "/api/v1/dashboard",
     "/api/v1/incidents",
     "/api/v1/incidents/*",
     "/api/v1/incidents/*/events",
+    "/api/v1/incidents/*/analysis",
     "/api/v1/events",
     "/api/v1/events/stream",
     "/api/v1/notifications",

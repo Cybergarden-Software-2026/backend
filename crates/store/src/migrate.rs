@@ -35,12 +35,20 @@ pub struct SharedMigration {
 }
 
 /// Порядок важен: по возрастанию версии; ревизии alembic идут цепочкой в том же порядке.
-pub const MIGRATIONS: &[SharedMigration] = &[SharedMigration {
-    version: 1,
-    alembic_revision: "0001",
-    description: "initial",
-    sql: include_str!("../../../migrations/0001_initial_up.sql"),
-}];
+pub const MIGRATIONS: &[SharedMigration] = &[
+    SharedMigration {
+        version: 1,
+        alembic_revision: "0001",
+        description: "initial",
+        sql: include_str!("../../../migrations/0001_initial_up.sql"),
+    },
+    SharedMigration {
+        version: 2,
+        alembic_revision: "0002",
+        description: "dashboard assignments",
+        sql: include_str!("../../../migrations/0002_assignments_up.sql"),
+    },
+];
 
 /// Ключ advisory lock миграций («MTS» + 2), чтобы два процесса `migrate` не синхронизировали
 /// журналы одновременно. Импортёр использует `0x4D545301`.

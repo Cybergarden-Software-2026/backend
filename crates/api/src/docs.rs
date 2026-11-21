@@ -1,9 +1,5 @@
-//! OpenAPI и страницы документации — те же, что генерирует FastAPI Python-версии.
-//!
-//! `static/` собирает `tests/fixtures/gen_api_parity.py` из настоящего приложения FastAPI:
-//! схема маршрутов, параметров и ответов — общий контракт обеих версий, поэтому Rust отдаёт её
-//! как есть, подставляя только `info.title` (`APP_NAME`). Страницы Swagger UI / ReDoc — шаблоны
-//! FastAPI с заполнителем `{{TITLE}}`.
+//! Исходная схема FastAPI расширена маршрутами и параметрами веб-клиента.
+//! API подставляет `APP_NAME` в схему OpenAPI и в заголовки Swagger UI / ReDoc.
 
 use std::sync::LazyLock;
 

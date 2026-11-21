@@ -188,6 +188,7 @@ str_enum! {
         Import = "import",
         Source = "source",
         Expiry = "expiry",
+        Assignment = "assignment",
     }
 }
 

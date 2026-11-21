@@ -102,6 +102,7 @@ impl JournalHead {
 pub struct BuiltSnapshot {
     pub revision: i64,
     pub json: Arc<str>,
+    pub web_json: Arc<str>,
 }
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -273,7 +274,7 @@ impl Broadcaster {
     pub async fn snapshot(&self) -> anyhow::Result<Option<BuiltSnapshot>> {
         let head = self.head().await?;
         let fresh =
-            |cached: &Option<BuiltSnapshot>| cached.as_ref().filter(|c| c.revision >= head.max_id).cloned();
+            |cached: &Option<BuiltSnapshot>| cached.as_ref().filter(|c| c.revision == head.max_id).cloned();
         if let Some(c) = fresh(&self.snapshot.lock().unwrap()) {
             return Ok(Some(c));
         }
@@ -387,6 +388,14 @@ where
 
 /// Режим API.md: снимок сразу и при каждой новой ревизии.
 pub fn snapshot_stream(broadcaster: &Arc<Broadcaster>, heartbeat: Duration) -> SseStream {
+    snapshot_stream_with_view(broadcaster, heartbeat, false)
+}
+
+pub(crate) fn snapshot_stream_with_view(
+    broadcaster: &Arc<Broadcaster>,
+    heartbeat: Duration,
+    web: bool,
+) -> SseStream {
     let b = Arc::clone(broadcaster);
     spawn_stream(broadcaster, move |sink| async move {
         sink.send(retry_line()).await?;
@@ -395,7 +404,8 @@ pub fn snapshot_stream(broadcaster: &Arc<Broadcaster>, heartbeat: Duration) -> S
         loop {
             if let Some(snap) = b.snapshot().await? {
                 if sent != Some(snap.revision) {
-                    sink.send(format_event("snapshot", &snap.json, Some(snap.revision), None))
+                    let data = if web { &snap.web_json } else { &snap.json };
+                    sink.send(format_event("snapshot", data, Some(snap.revision), None))
                         .await?;
                     sent = Some(snap.revision);
                     known = known.max(snap.revision);
@@ -534,20 +544,35 @@ impl Journal for DbJournal {
 
     fn build_snapshot(&self) -> BoxFuture<'_, anyhow::Result<Option<BuiltSnapshot>>> {
         Box::pin(async move {
-            let value = match crate::dashboard::build_snapshot(&self.state).await {
+            let mut value = match crate::dashboard::build_snapshot_with_view(&self.state, true).await {
                 Ok(v) => v,
                 Err(e) if e.code == "SOURCE_NOT_READY" => return Ok(None),
                 Err(e) => return Err(anyhow::anyhow!("{}: {}", e.code, e.message)),
             };
             let revision = value["revision"].as_i64().unwrap_or_default();
-            Ok(Some(snapshot_from_value(revision, &value)))
+            let web_json = pycompat::dumps_pydantic(&value).into();
+            // Both representations must describe the same committed revision and server clock.
+            if let Some(items) = value["items"].as_array_mut() {
+                for item in items {
+                    if let Some(meta) = item["dashboard"].as_object_mut() {
+                        meta.shift_remove("sourceDates");
+                    }
+                }
+            }
+            Ok(Some(BuiltSnapshot {
+                revision,
+                json: pycompat::dumps_pydantic(&value).into(),
+                web_json,
+            }))
         })
     }
 }
 
 pub fn snapshot_from_value(revision: i64, value: &Value) -> BuiltSnapshot {
+    let json: Arc<str> = pycompat::dumps_pydantic(value).into();
     BuiltSnapshot {
         revision,
-        json: pycompat::dumps_pydantic(value).into(),
+        web_json: Arc::clone(&json),
+        json,
     }
 }

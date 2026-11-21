@@ -336,6 +336,19 @@ pub fn incident_item(p: &IncidentProjection<'_>) -> Value {
     Value::Object(item)
 }
 
+/// Preserve source fields and supply authoritative UTC instants for browser-side clocks.
+pub fn web_incident_item(p: &IncidentProjection<'_>) -> Value {
+    let mut item = incident_item(p);
+    let r = p.row;
+    item["dashboard"]["sourceDates"] = json!({
+        "submitDate": r.submit_date,
+        "deadline": r.deadline,
+        "completionDate": r.completion_date,
+        "lastAssignmentToTeamDateTime": r.last_assignment_to_team_at,
+    });
+    item
+}
+
 /// `GroupView`.
 pub fn group_views<I: Groupable + ?Sized>(groups: &[GroupResult<'_, I>]) -> Value {
     groups

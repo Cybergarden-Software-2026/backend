@@ -186,6 +186,46 @@ macro_rules! server_or_skip {
 // ================================================================ режим snapshot (API.md §4)
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_snapshot_stream_preserves_source_fields_and_exposes_utc_instants() {
+    let mut srv = server_or_skip!();
+    let mut recs = records();
+    update(
+        demo(&mut recs),
+        &[
+            ("submitDate", json!("2026-11-21T10:00:00+03:00")),
+            ("lastAssignmentToTeamDateTime", json!("2026-11-21 07:01:00")),
+            ("deadline", json!("2026-11-21T10:05:00+03:00")),
+            ("completionDate", json!("0001-01-01T00:00:00")),
+            ("assignedGroupName", Value::Null),
+        ],
+    );
+    srv.publish(&recs).await;
+    let mut sse = srv.stream("/events/stream?view=web", &[]).await;
+    let snapshot = data(&sse.next_event("snapshot", S5).await);
+    let rest: Value = srv.get("/snapshot?view=web").await.json().await.unwrap();
+    assert_eq!(snapshot, rest);
+    let item = rest["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == DEMO_ID)
+        .unwrap();
+    assert_eq!(item["submitDate"], "2026-11-21T10:00:00+03:00");
+    assert!(item["assignedGroupName"].is_null());
+    assert_eq!(
+        item["dashboard"]["sourceDates"],
+        json!({
+            "submitDate": "2026-11-21T07:00:00Z", "lastAssignmentToTeamDateTime": "2026-11-21T07:01:00Z",
+            "deadline": "2026-11-21T07:05:00Z", "completionDate": null,
+        })
+    );
+    let legacy: Value = srv.get("/snapshot").await.json().await.unwrap();
+    assert!(legacy["items"][0]["dashboard"].get("sourceDates").is_none());
+    drop(sse);
+    srv.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_snapshot_stream_end_to_end_within_5_seconds() {
     let mut srv = server_or_skip!();
     let mut recs = records();

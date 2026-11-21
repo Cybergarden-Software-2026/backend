@@ -140,15 +140,25 @@ pub async fn touch(conn: &mut PgConnection, now: DateTime<Utc>) -> Result<(), sq
 
 // ------------------------------------------------------------------------------------ реестр
 
-/// Весь реестр (включая выбывшие записи) по возрастанию `pk` — вход плана импорта.
+const STORED_COLUMNS: &str = "pk, id, sys_id, raw, content_hash, incident_revision, is_present, normalized_state, \
+    priority_id, assigned_group_name, resolution_phase, resolved_detected_at, recently_resolved_until";
+
+pub async fn stored_by_sys_id(
+    conn: &mut PgConnection,
+    sys_id: &str,
+) -> Result<Option<StoredIncident>, sqlx::Error> {
+    let sql = format!("SELECT {STORED_COLUMNS} FROM incidents WHERE is_present AND sys_id = $1");
+    let row = sqlx::query(AssertSqlSafe(sql))
+        .bind(sys_id)
+        .fetch_optional(conn)
+        .await?;
+    row.as_ref().map(stored_from_row).transpose()
+}
+
+/// Весь реестр (включая выбывшие записи) по возрастанию pk — вход плана импорта.
 pub async fn all_incidents(conn: &mut PgConnection) -> Result<Vec<StoredIncident>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT pk, id, sys_id, raw, content_hash, incident_revision, is_present, normalized_state, \
-         priority_id, assigned_group_name, resolution_phase, resolved_detected_at, \
-         recently_resolved_until FROM incidents ORDER BY pk",
-    )
-    .fetch_all(conn)
-    .await?;
+    let sql = format!("SELECT {STORED_COLUMNS} FROM incidents ORDER BY pk");
+    let rows = sqlx::query(AssertSqlSafe(sql)).fetch_all(conn).await?;
     rows.iter().map(stored_from_row).collect()
 }
 
