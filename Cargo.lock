@@ -304,6 +304,7 @@ name = "dashboard"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dashboard-ai",
  "dashboard-api",
  "dashboard-config",
  "dashboard-importer",
@@ -311,6 +312,28 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "dashboard-ai"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "dashboard-api",
+ "dashboard-config",
+ "dashboard-domain",
+ "dashboard-importer",
+ "dashboard-store",
+ "http-body-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
 ]
 
 [[package]]
@@ -393,6 +416,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

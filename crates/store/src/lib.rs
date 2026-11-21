@@ -3,6 +3,7 @@
 //! Пул соединений (как `app/core/database.py`), миграции на общем SQL (R1) и репозиторий
 //! импортёра (R4), чтение для API в одной транзакции `REPEATABLE READ READ ONLY` (R5).
 
+pub mod analysis_repo;
 pub mod import_repo;
 pub mod migrate;
 pub mod read_repo;

@@ -9,11 +9,13 @@
 //! [`pycompat`] и [`pydatetime`] воспроизводят поведение Python, от которого зависит паритет:
 //! `content_hash` в общей БД, набор принимаемых дат, тексты ошибок.
 
+pub mod analysis;
 pub mod change_detector;
 pub mod constants;
 pub mod cursors;
 pub mod grouping;
 pub mod incident_query;
+pub mod llm;
 pub mod normalizer;
 pub mod notification_rules;
 pub mod projection;

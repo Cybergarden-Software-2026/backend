@@ -7,7 +7,9 @@
 //! * ограничения (`> 0`, `>= 1`, …) и валидаторы (`ITSM_*`, часовой пояс) совпадают;
 //! * ошибки собираются все сразу, а не по одной.
 //!
-//! Переменные ИИ-модуля (`AI_*`, `OLLAMA_*`) Rust-версия не читает: модуль подключается отдельно.
+//! Интеграция с локальной LLM (`LLM_*`) по умолчанию выключена (`LLM_ENABLED=false`): без неё процессы
+//! не ставят задачи в очередь и не обращаются к модели. Адрес модели (`LLM_BASE_URL`) нужен только
+//! `ai-worker`, остальные процессы используют лишь идентификатор модели для очереди.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -92,6 +94,24 @@ pub struct Settings {
     pub sse_poll_interval: Duration,
     pub sse_heartbeat: Duration,
     pub events_retention: u32,
+
+    // --- Локальная LLM (OpenAI-совместимый `llama-server`) ---
+    /// Постановка задач (импортёр), выдача результатов (API) и вызовы модели (`ai-worker`).
+    pub llm_enabled: bool,
+    /// Базовый адрес вместе с `/v1`, без завершающего `/`. Обязателен только для `ai-worker`.
+    pub llm_base_url: Option<String>,
+    /// Имя модели в запросе (`model`), например алиас `qwen-local`.
+    pub llm_model: String,
+    /// Метка весов за тем же алиасом (например, начало SHA-256 GGUF). Её смена ставит задачи заново.
+    pub llm_model_revision: Option<String>,
+    pub llm_timeout: Duration,
+    pub llm_max_tokens: u32,
+    pub llm_max_attempts: u32,
+    pub llm_poll_interval: Duration,
+    /// Аренда задачи: после истечения её может забрать другой экземпляр worker.
+    pub llm_lease: Duration,
+    /// Ограничение длины каждого текстового поля инцидента в запросе (символы).
+    pub llm_input_max_chars: u32,
 
     /// Строки `.env`, пропущенные при разборе (для предупреждения в логе после его настройки).
     pub env_file_warnings: Vec<String>,
@@ -215,6 +235,31 @@ impl Settings {
             }),
         };
 
+        let llm_base_url = match r.raw("llm_base_url").map(str::trim) {
+            None | Some("") => None,
+            Some(v) => {
+                let lower = v.to_ascii_lowercase();
+                if !lower.starts_with("http://") && !lower.starts_with("https://") {
+                    r.problem("LLM_BASE_URL", format!("expected http:// or https:// URL, got {v:?}"));
+                }
+                Some(v.trim_end_matches('/').to_owned())
+            }
+        };
+        let llm_model = r.string("llm_model", "qwen-local").trim().to_owned();
+        if llm_model.is_empty() {
+            r.problem("LLM_MODEL", "must not be empty".into());
+        }
+        let llm_model_revision = r
+            .raw("llm_model_revision")
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned);
+        let llm_timeout = r.seconds("llm_timeout_seconds", 60.0, false);
+        let llm_lease = r.seconds("llm_lease_seconds", 120.0, false);
+        if llm_lease <= llm_timeout {
+            r.problem("LLM_LEASE_SECONDS", "must be greater than LLM_TIMEOUT_SECONDS".into());
+        }
+
         let settings = Settings {
             app_name: r.string("app_name", "MTS Incident Coordinator Dashboard"),
             environment,
@@ -253,6 +298,21 @@ impl Settings {
             sse_poll_interval: r.seconds("sse_poll_interval_seconds", 0.5, false),
             sse_heartbeat: r.seconds("sse_heartbeat_seconds", 15.0, false),
             events_retention: r.number("events_retention", 10_000u32, |v| *v >= 100, ">= 100"),
+            llm_enabled: r.boolean("llm_enabled", false),
+            llm_base_url,
+            llm_model,
+            llm_model_revision,
+            llm_timeout,
+            llm_max_tokens: r.number("llm_max_tokens", 200u32, |v| (16..=4096).contains(v), "16..=4096"),
+            llm_max_attempts: r.number("llm_max_attempts", 3u32, |v| (1..=20).contains(v), "1..=20"),
+            llm_poll_interval: r.seconds("llm_poll_interval_seconds", 1.0, false),
+            llm_lease,
+            llm_input_max_chars: r.number(
+                "llm_input_max_chars",
+                3000u32,
+                |v| (200..=50_000).contains(v),
+                "200..=50000",
+            ),
             env_file_warnings: Vec::new(),
         };
 
@@ -274,6 +334,15 @@ impl Settings {
             return None;
         }
         Some(template)
+    }
+
+    /// Идентификатор генерации в очереди (`analysis_jobs.model`): имя модели и, если задана, метка весов.
+    /// Импортёр, API и `ai-worker` должны получать одинаковые `LLM_MODEL` и `LLM_MODEL_REVISION`.
+    pub fn llm_job_model(&self) -> String {
+        match &self.llm_model_revision {
+            Some(rev) => format!("{}@{rev}", self.llm_model),
+            None => self.llm_model.clone(),
+        }
     }
 
     /// Размер пула sqlx: у SQLAlchemy это `pool_size + max_overflow`.
@@ -525,6 +594,42 @@ mod tests {
     }
 
     /// `.env.example` в корне репозитория разбирается без ошибок.
+    #[test]
+    fn llm_is_disabled_by_default() {
+        let s = with(&[]).unwrap();
+        assert!(!s.llm_enabled);
+        assert_eq!(s.llm_base_url, None);
+        assert_eq!(s.llm_model, "qwen-local");
+        assert_eq!(s.llm_job_model(), "qwen-local");
+        assert_eq!(s.llm_timeout, Duration::from_secs(60));
+        assert_eq!(s.llm_max_attempts, 3);
+    }
+
+    #[test]
+    fn llm_settings_are_validated() {
+        let s = with(&[
+            ("LLM_ENABLED", "true"),
+            ("LLM_BASE_URL", " http://172.18.0.1:18080/v1/ "),
+            ("LLM_MODEL_REVISION", "99e7f220"),
+        ])
+        .unwrap();
+        assert!(s.llm_enabled);
+        assert_eq!(s.llm_base_url.as_deref(), Some("http://172.18.0.1:18080/v1"));
+        assert_eq!(s.llm_job_model(), "qwen-local@99e7f220");
+
+        let err = with(&[
+            ("LLM_BASE_URL", "172.18.0.1:18080"),
+            ("LLM_MODEL", " "),
+            ("LLM_TIMEOUT_SECONDS", "200"),
+            ("LLM_MAX_ATTEMPTS", "0"),
+        ])
+        .unwrap_err();
+        let text = err.to_string();
+        for key in ["LLM_BASE_URL", "LLM_MODEL:", "LLM_LEASE_SECONDS", "LLM_MAX_ATTEMPTS"] {
+            assert!(text.contains(key), "{key} not in {text}");
+        }
+    }
+
     #[test]
     fn shared_env_example_parses() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env.example");

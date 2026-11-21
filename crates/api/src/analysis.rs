@@ -1,12 +1,13 @@
-//! Объяснимый разбор инцидента по правилам веб-клиента.
+//! Объяснимый разбор инцидента по правилам веб-клиента и, если готова, выжимка локальной модели.
 
-use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use axum::extract::{OriginalUri, State};
 use chrono::{DateTime, Utc};
+use dashboard_domain::analysis::{TeamCandidate, candidate_teams};
 use dashboard_domain::constants::NormalizedState;
 use dashboard_domain::projection::{IncidentRow, format_utc};
+use dashboard_store::analysis_repo::{self, JobSpec};
 use serde_json::{Value, json};
 
 use crate::AppState;
@@ -16,25 +17,77 @@ use crate::params::Params;
 use crate::response::PyJson;
 use crate::web_queue::{sla_kind, state_of};
 
+const RULES_REASON: &str = "Команда встречается в завершённых записях того же сервиса или сценария продукта. Совпадение не подтверждает зону ответственности.";
+const LLM_REASON: &str = "Модель выбрала команду среди кандидатов по завершённым записям того же сервиса или сценария продукта. Совпадение не подтверждает зону ответственности.";
+
 pub async fn get(State(state): State<AppState>, OriginalUri(uri): OriginalUri) -> ApiResult<PyJson> {
     let mut params = Params::new(&uri);
     let key = path_key(&mut params, &uri);
     params.finish()?;
     let key = key.unwrap_or_default();
-    let loaded = load(&state, true).await?;
+    let mut loaded = load(&state, true).await?;
     let item = loaded
         .rows
         .iter()
         .find(|row| row.sys_id == key)
         .or_else(|| loaded.rows.iter().find(|row| row.id == key))
         .ok_or_else(incident_not_found)?;
-    Ok(PyJson(analyze(
+    let mut analysis = analyze(
         item,
         &loaded.rows,
         loaded.revision,
         (state.clock)(),
         &state.settings.coordinator_group_name,
-    )))
+    );
+    if state.settings.llm_enabled {
+        let spec = JobSpec::summary(&state.settings);
+        if let Some(stored) = analysis_repo::current_result(&mut loaded.tx, &spec, item.pk).await? {
+            let teams: HashSet<String> = analysis_repo::team_names(&mut loaded.tx).await?.into_iter().collect();
+            let rules = candidate_teams(item, &loaded.rows, &state.settings.coordinator_group_name);
+            apply_llm(&mut analysis, &stored.result, stored.finished_at, &rules, &teams);
+        }
+    }
+    Ok(PyJson(analysis))
+}
+
+/// Заменяет выжимку и кандидатов результатом модели. Команда выдаётся, только если её выбрала
+/// модель среди переданных ей кандидатов и она до сих пор есть среди кандидатов правил и в
+/// справочнике; `evidenceIds` берутся из текущих правил. Иначе `candidates` пуст.
+fn apply_llm(
+    analysis: &mut Value,
+    result: &Value,
+    finished_at: DateTime<Utc>,
+    rules: &[TeamCandidate<'_>],
+    teams: &HashSet<String>,
+) {
+    let Some(summary) = result.get("summary").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) else {
+        return;
+    };
+    let offered: Vec<&str> = result
+        .get("candidates")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let chosen = result
+        .get("team")
+        .and_then(Value::as_str)
+        .filter(|team| offered.contains(team) && teams.contains(*team))
+        .and_then(|team| rules.iter().find(|c| c.team == team));
+    let candidates: Vec<Value> = chosen
+        .map(|c| json!({"team": c.team, "evidenceIds": c.evidence_ids, "reason": LLM_REASON}))
+        .into_iter()
+        .collect();
+    let had_rules = !rules.is_empty();
+    analysis["provider"] = json!("llm");
+    analysis["summary"] = json!(summary);
+    analysis["generatedAt"] = json!(format_utc(&finished_at));
+    analysis["candidates"] = Value::Array(candidates);
+    if chosen.is_none()
+        && had_rules
+        && let Some(missing) = analysis["missing"].as_array_mut()
+    {
+        missing.push(json!("Модель не выбрала команду: оснований в записи недостаточно, выберите команду вручную."));
+    }
 }
 
 fn analyze(
@@ -65,7 +118,10 @@ fn analyze(
     if item.is_need_up == Some(true) {
         attention.push("После устранения проблемы требуется работа с последствиями.");
     }
-    let candidates = candidate_teams(item, items, coordinator_group);
+    let candidates: Vec<Value> = candidate_teams(item, items, coordinator_group)
+        .into_iter()
+        .map(|c| json!({"team": c.team, "evidenceIds": c.evidence_ids, "reason": RULES_REASON}))
+        .collect();
     let mut missing = Vec::new();
     if item.deadline.is_none() {
         missing.push("Не указан срок решения.");
@@ -105,46 +161,4 @@ fn analyze(
         "missing": missing,
         "candidates": candidates,
     })
-}
-
-fn candidate_teams(item: &IncidentRow, items: &[IncidentRow], coordinator_group: &str) -> Vec<Value> {
-    let mut teams = HashMap::<&str, (usize, Vec<&str>)>::new();
-    for (index, other) in items.iter().enumerate() {
-        let team = other.assigned_group_name.as_deref().unwrap_or_default();
-        if other.sys_id == item.sys_id
-            || !matches!(
-                state_of(other),
-                NormalizedState::Resolved | NormalizedState::Closed
-            )
-            || other.completion_date.is_none()
-            || team.trim().is_empty()
-            || team == coordinator_group
-            || team == "AutoClosedMi"
-        {
-            continue;
-        }
-        let same_service =
-            item.service.as_deref().is_some_and(|s| !s.trim().is_empty()) && item.service == other.service;
-        let same_scenario = item.scenario_name.as_deref().is_some_and(|s| !s.is_empty())
-            && item.scenario_name == other.scenario_name
-            && item.product_name == other.product_name;
-        if same_service || same_scenario {
-            teams
-                .entry(team)
-                .or_insert_with(|| (index, Vec::new()))
-                .1
-                .push(&other.id);
-        }
-    }
-    let mut teams: Vec<_> = teams.into_iter().collect();
-    teams.sort_unstable_by_key(|(_, (index, evidence))| (Reverse(evidence.len()), *index));
-    teams
-        .into_iter()
-        .take(3)
-        .map(|(team, (_, evidence))| json!({
-            "team": team,
-            "evidenceIds": evidence,
-            "reason": "Команда встречается в завершённых записях того же сервиса или сценария продукта. Совпадение не подтверждает зону ответственности."
-        }))
-        .collect()
 }

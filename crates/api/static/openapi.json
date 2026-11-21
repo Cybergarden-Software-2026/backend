@@ -3356,8 +3356,10 @@
           "provider": {
             "type": "string",
             "enum": [
-              "rules"
-            ]
+              "rules",
+              "llm"
+            ],
+            "description": "rules: explainable rules-based analysis. llm: summary and at most one validated team candidate produced in advance by the local model for the current incident fields."
           },
           "summary": {
             "type": "string"
