@@ -6,3 +6,4 @@ services:
   migrate: *release
   api: *release
   importer: *release
+  ai-worker: *release

@@ -1,0 +1,28 @@
+[package]
+name = "dashboard-ai"
+description = "ИИ-worker: очередь analysis_jobs и клиент локальной модели (OpenAI-совместимый llama-server)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dashboard-config.workspace = true
+dashboard-domain.workspace = true
+dashboard-store.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+chrono.workspace = true
+dashboard-api.workspace = true
+dashboard-importer.workspace = true
+http-body-util.workspace = true
+tower = { workspace = true, features = ["util"] }

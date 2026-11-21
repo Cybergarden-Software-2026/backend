@@ -17,6 +17,7 @@ dashboard-domain = { path = "crates/domain" }
 dashboard-store = { path = "crates/store" }
 dashboard-api = { path = "crates/api" }
 dashboard-importer = { path = "crates/importer" }
+dashboard-ai = { path = "crates/ai" }
 
 anyhow = "1.0.104"
 axum = "0.8.9"
@@ -65,11 +66,16 @@ path = "bin/migrate.rs"
 name = "importer"
 path = "bin/importer.rs"
 
+[[bin]]
+name = "ai-worker"
+path = "bin/ai_worker.rs"
+
 [dependencies]
 dashboard-config.workspace = true
 dashboard-store.workspace = true
 dashboard-api.workspace = true
 dashboard-importer.workspace = true
+dashboard-ai.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

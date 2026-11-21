@@ -36,15 +36,7 @@ pub(crate) fn is_page_request(p: &Params) -> bool {
 }
 
 /// Как stateOf в веб-клиенте: неизвестный stateEnum сохраняет статус Unknown.
-pub(crate) fn state_of(row: &IncidentRow) -> NormalizedState {
-    match row.state_enum.as_deref() {
-        Some(name) if !name.is_empty() => name.parse().unwrap_or(NormalizedState::Unknown),
-        _ => row
-            .state_id
-            .and_then(|id| NormalizedState::from_state_id(i64::from(id)))
-            .unwrap_or(NormalizedState::Unknown),
-    }
-}
+pub(crate) use dashboard_domain::analysis::state_of;
 
 pub(crate) fn sla_kind(row: &IncidentRow, now: DateTime<Utc>) -> &'static str {
     use NormalizedState::*;

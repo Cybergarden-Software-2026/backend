@@ -342,6 +342,14 @@ impl ImportService {
         for (pk, content_hash) in &plan.hash_updates {
             repo::update_content_hash(&mut tx, *pk, content_hash).await?;
         }
+        if self.settings.llm_enabled && revision.is_some() {
+            // В той же транзакции, что и новая ревизия: изменение не останется без задачи.
+            let spec = dashboard_store::analysis_repo::JobSpec::summary(&self.settings);
+            let queued = dashboard_store::analysis_repo::enqueue(&mut tx, &spec).await?;
+            if queued > 0 {
+                tracing::info!(queued, "Поставлены задачи ИИ-анализа");
+            }
+        }
 
         self.mark_success(
             &mut tx,

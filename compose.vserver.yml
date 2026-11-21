@@ -4,3 +4,18 @@ services:
   api:
     ports: !override
       - "127.0.0.1:8001:8080"
+  # Только worker подключён к внутренней сети underctrl_qwen (проброс к llama-server на хосте).
+  # API, импортёр, БД и веб-фронтенд в эту сеть не входят. Адрес модели (LLM_BASE_URL) и
+  # LLM_ENABLED=true для worker — в ai-worker.env на сервере, а не в общем .env.
+  ai-worker:
+    env_file: !override
+      - path: .env
+      - path: /etc/underctrl-backend-deploy/ai-worker.env
+        required: false
+    networks:
+      - default
+      - underctrl_qwen
+
+networks:
+  underctrl_qwen:
+    external: true

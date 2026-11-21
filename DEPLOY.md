@@ -155,3 +155,75 @@ sudo journalctl -u underctrl-backend-deploy.service -n 80 --no-pager
 При изменении самой конфигурации Compose повторите установку файлов
 из проверенного коммита `main`. Автоматический цикл использует параметры
 Compose, установленные владельцем сервера в `/etc/underctrl-backend-deploy`.
+
+## ИИ-анализ: ai-worker и локальная Qwen
+
+`ai-worker` заранее готовит выжимку и подсказку команды для «Помощь ИИ» и
+проверяет автоматические группы массовых сбоев (название группы от модели): берёт
+задачи из `analysis_jobs`, вызывает `llama-server` по OpenAI-совместимому
+`/v1/chat/completions` и сохраняет проверенный результат. `/analysis` отдаёт
+его с `provider: "llm"`, а без готового результата — разбор по правилам.
+API запрос модели не ждёт, остановка worker или модели на API не влияет.
+
+Сеть: worker подключён к `default` (PostgreSQL) и к внутренней сети
+`underctrl_qwen`; API, импортёр, БД и веб-фронтенд в неё не входят. Хостовый
+`llama-server` слушает `127.0.0.1:8080`, в сеть `underctrl_qwen` его выводит
+отдельный systemd-проброс на шлюз этой сети. Реальный адрес модели в образ и
+репозиторий не попадает.
+
+**Однократная настройка vserver (до установки нового Compose).** Без сети
+`underctrl_qwen` `compose.vserver.yml` не поднимется.
+
+1. Сеть и шлюз:
+
+   ```bash
+   sudo docker network create --driver bridge --internal \
+     --opt com.docker.network.bridge.name=br-uc-qwen underctrl_qwen
+   sudo docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' underctrl_qwen
+   ```
+
+2. Проброс `underctrl-qwen-worker.socket`/`.service` по образцу
+   `underctrl-qwen-bridge.*`: `ListenStream=<шлюз>:18080`,
+   `BindToDevice=br-uc-qwen`, получатель `systemd-socket-proxyd` —
+   `127.0.0.1:8080`; затем `systemd-analyze verify`, `systemctl daemon-reload`,
+   `systemctl enable --now underctrl-qwen-worker.socket`.
+
+3. Параметры только для worker — `/etc/underctrl-backend-deploy/ai-worker.env`
+   (права `0600`, владелец `root`):
+
+   ```dotenv
+   LLM_ENABLED=true
+   LLM_BASE_URL=http://<шлюз underctrl_qwen>:18080/v1
+   LLM_MODEL=qwen-local
+   # первые 8 символов SHA-256 загруженного GGUF; при замене весов — обновить
+   LLM_MODEL_REVISION=
+   ```
+
+4. Включить постановку задач и выдачу результатов: в
+   `~/cybergarden/backend/.env` добавить `LLM_ENABLED=true` и те же
+   `LLM_MODEL`/`LLM_MODEL_REVISION` (адрес модели туда не добавлять).
+   Значения должны совпадать у API, импортёра и worker, иначе API не найдёт
+   готовые результаты.
+
+5. Обновить установленные файлы деплоя штатным установщиком (раздел выше).
+   Следующий запуск таймера поднимет `ai-worker` из того же образа, что API
+   и импортёр. При первом старте worker сам ставит задачи для всех текущих
+   карточек; дальше их ставит импортёр при изменении полей инцидента.
+
+Проверка: `sudo docker compose -p mts-incident-dashboard logs ai-worker`
+показывает идентификатор задачи, длительность и результат (без текста
+инцидентов). Состояние очереди:
+
+```bash
+sudo docker compose -p mts-incident-dashboard exec -T db sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT status, count(*) FROM analysis_jobs GROUP BY 1"'
+```
+
+Запрос к модели из сетевого пространства worker и отключение старого
+проброса `underctrl-qwen-bridge` — по шагам из `QWEN_BACKEND_HANDOFF.md`
+(раздел «Отдельная сеть для worker»). Откат: при провале проверок
+автодеплой возвращает прежние API и импортёр; если прежний образ ещё без
+`ai-worker`, worker останавливается.
+
+Локально и в CI `LLM_ENABLED=false`: worker простаивает, тесты используют
+имитацию модели и не обращаются к vserver.
