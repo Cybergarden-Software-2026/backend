@@ -4,12 +4,14 @@
 //! * R5: REST `/api/v1` (API.md и ТЗ) — [`dashboard`], [`notifications`], проверка параметров с
 //!   текстами FastAPI/pydantic ([`params`]), OpenAPI и страницы документации ([`docs`]),
 //!   307 на адрес без завершающего `/` (как `redirect_slashes` Starlette);
+//! * демо-режим фронтенда (`POST /demo`, `PUT /incidents`, только при `DEMO_API_ENABLED`) — [`demo`];
 //! * R6: SSE (`/events/stream`, `/events?since=…`) — [`sse`]: broadcaster и режимы
 //!   `snapshot`/`notify`.
 
 mod analysis;
 pub mod assignments;
 pub mod dashboard;
+pub mod demo;
 pub mod docs;
 pub mod error;
 pub mod health;
@@ -24,7 +26,7 @@ use std::any::Any;
 use std::sync::{Arc, OnceLock};
 
 use axum::Router;
-use axum::extract::Request;
+use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -109,7 +111,15 @@ fn api_v1() -> Router<AppState> {
         .route("/teams", get(assignments::teams))
         .route("/incidents/{key}/assignment", post(assignments::assign))
         .route("/dashboard", get(dashboard::dashboard))
-        .route("/incidents", get(dashboard::list_incidents))
+        .route(
+            "/incidents",
+            get(dashboard::list_incidents)
+                .put(demo::replace_incidents)
+                .layer(DefaultBodyLimit::max(
+                    usize::try_from(dashboard_importer::reader::DEFAULT_MAX_BYTES).unwrap_or(usize::MAX),
+                )),
+        )
+        .route("/demo", post(demo::simulate))
         .route("/incidents/{key}", get(dashboard::get_incident))
         .route("/incidents/{key}/events", get(dashboard::get_incident_events))
         .route("/incidents/{key}/analysis", get(analysis::get))
@@ -181,6 +191,7 @@ const ROUTE_PATTERNS: &[&str] = &[
     "/api/v1/incidents/*/assignment",
     "/api/v1/dashboard",
     "/api/v1/incidents",
+    "/api/v1/demo",
     "/api/v1/incidents/*",
     "/api/v1/incidents/*/events",
     "/api/v1/incidents/*/analysis",

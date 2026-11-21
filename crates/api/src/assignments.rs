@@ -26,6 +26,18 @@ pub async fn teams(State(state): State<AppState>) -> ApiResult<PyJson> {
     Ok(PyJson(json!({"items": items, "revision": data.revision})))
 }
 
+/// `Authorization: Bearer <token>` совпадает с ключом координатора (сравнение за постоянное время).
+pub(crate) fn bearer_matches(headers: &HeaderMap, expected: &str) -> bool {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+        .map(|(_, v)| v)
+        .unwrap_or("");
+    bool::from(Sha256::digest(expected.as_bytes()).ct_eq(&Sha256::digest(token.as_bytes())))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Assignment {
@@ -46,14 +58,7 @@ pub async fn assign(
             "Для назначения команд настройте ASSIGNMENT_TOKEN на сервере.",
         )
     })?;
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split_once(' '))
-        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
-        .map(|(_, v)| v)
-        .unwrap_or("");
-    if !bool::from(Sha256::digest(expected.as_bytes()).ct_eq(&Sha256::digest(token.as_bytes()))) {
+    if !bearer_matches(&headers, expected) {
         return Err(AppError::new(
             StatusCode::UNAUTHORIZED,
             "ASSIGNMENT_UNAUTHORIZED",
