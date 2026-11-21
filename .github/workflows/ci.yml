@@ -33,10 +33,9 @@ jobs:
       - name: Validate Compose
         run: |
           cp .env.example .env
-          docker compose -f docker-compose.yml config --quiet
-          if [ -f compose.vserver.yml ]; then
-            docker compose -f docker-compose.yml -f compose.vserver.yml config --quiet
-          fi
+          UNDERCTRL_BACKEND_IMAGE=backend-runtime:ci docker compose \
+            -f docker-compose.yml -f compose.vserver.yml -f deploy/compose.image.yml \
+            config --quiet
 
       - name: Build test image
         run: docker build --target test -t backend-test:ci .

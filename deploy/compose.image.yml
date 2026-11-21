@@ -1,0 +1,8 @@
+x-release: &release
+  image: ${UNDERCTRL_BACKEND_IMAGE:?set the backend release image}
+  pull_policy: never
+
+services:
+  migrate: *release
+  api: *release
+  importer: *release
