@@ -301,7 +301,7 @@ impl ImportService {
 
     pub async fn apply(
         &self,
-        validated: ValidatedSnapshot,
+        mut validated: ValidatedSnapshot,
         sha256: &str,
         fingerprint: FileFingerprint,
     ) -> Result<ImportOutcome, ImportError> {
@@ -310,6 +310,12 @@ impl ImportService {
         let mut state = repo::lock_state(&mut tx).await?;
         let rows = repo::all_incidents(&mut tx).await?;
         let is_initial = state.last_success_at.is_none() && rows.is_empty();
+        crate::assignment::reconcile_source(
+            &mut tx,
+            &mut validated.incidents,
+            self.settings.source_naive_timezone,
+        )
+        .await?;
         let incident_count = validated.incidents.len();
         let warnings = validated.warnings;
 
@@ -389,6 +395,7 @@ impl ImportService {
     pub async fn expire_resolutions(&self) -> Result<Option<i64>, ImportError> {
         let now = self.now();
         let mut tx = self.pool.begin().await?;
+        repo::lock_state(&mut tx).await?;
         let expired = repo::expire_resolutions(&mut tx, now).await?;
         if expired.is_empty() {
             tx.commit().await?;
@@ -477,12 +484,12 @@ fn event_payload(plan: &ImportPlan) -> Value {
 }
 
 /// `_apply_plan`: реестр → лента ChangeEvent → пополевая история → уведомления.
-async fn apply_plan(
+pub(crate) async fn apply_plan(
     conn: &mut PgConnection,
     plan: &ImportPlan,
     revision: i64,
     now: DateTime<Utc>,
-) -> Result<(), ImportError> {
+) -> Result<(), sqlx::Error> {
     // 1. Реестр. SQLAlchemy при flush выполняет UPDATE раньше INSERT — тот же порядок здесь.
     let mut pks: HashMap<usize, i64> = HashMap::new();
     for (index, item) in plan.items.iter().enumerate() {

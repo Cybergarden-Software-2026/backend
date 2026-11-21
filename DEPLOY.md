@@ -96,7 +96,7 @@ docker compose logs -f importer         # «Снимок принят: revision=
 ## Запуск на vserver
 
 Для этого варианта используйте Docker Engine 28 или новее и Docker Compose
-2.24.4 или новее. Из корня репозитория с настроенным `.env` выполните:
+2.24.4 или новее. Обе сборки находятся в ветке `codex/manual-docker-vserver`. Чтобы разрешить назначения, добавьте в серверный `.env` секрет `ASSIGNMENT_TOKEN` и передайте его координатору. Например, `openssl rand -hex 32` генерирует случайное значение. Для режима чтения оставьте переменную пустой. Из корня репозитория с настроенным `.env` выполните:
 
 ```bash
 dc() { sudo docker compose -f docker-compose.yml -f compose.vserver.yml "$@"; }

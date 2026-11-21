@@ -91,7 +91,7 @@ async fn send(app: &axum::Router, req: &Value) -> Got {
 }
 
 /// Первое расхождение ответа с эталоном.
-fn compare(want: &Value, got: &Got) -> Option<String> {
+fn compare(want: &Value, got: &Got, app_name: &str) -> Option<String> {
     let mut problems = Vec::new();
     if want["status"].as_u64() != Some(u64::from(got.status)) {
         problems.push(format!("status python={} rust={}", want["status"], got.status));
@@ -123,6 +123,14 @@ fn compare(want: &Value, got: &Got) -> Option<String> {
                 tail(body),
                 tail(&got.body)
             ));
+        }
+    } else if want["req"]["p"] == "/api/v1/openapi.json" {
+        // The schema now includes the web client. Compare this response to the current
+        // published contract while retaining the historical fixture for all legacy routes.
+        let mut spec: Value = serde_json::from_str(include_str!("../static/openapi.json")).unwrap();
+        spec["info"]["title"] = Value::String(app_name.to_owned());
+        if got.body != serde_json::to_string(&spec).unwrap() {
+            problems.push("OpenAPI response differs from the published contract".into());
         }
     } else {
         let digest = hex::encode(Sha256::digest(got.body.as_bytes()));
@@ -201,7 +209,7 @@ async fn rest_api_matches_python() {
             for want in result["responses"].as_array().unwrap() {
                 let got = send(&app, &want["req"]).await;
                 checked += 1;
-                if let Some(diff) = compare(want, &got) {
+                if let Some(diff) = compare(want, &got, &e.settings.app_name) {
                     failures.push(format!(
                         "seed {seed}, {label}: {} {}\n  {diff}",
                         want["req"]["m"].as_str().unwrap(),

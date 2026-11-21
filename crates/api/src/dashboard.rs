@@ -59,7 +59,10 @@ impl Loaded {
 
 /// `DashboardService._load`.
 pub(crate) async fn load(state: &AppState, with_rows: bool) -> ApiResult<Loaded> {
-    let mut tx = read_repo::begin_consistent_read(&state.pool).await?;
+    load_in_tx(read_repo::begin_consistent_read(&state.pool).await?, with_rows).await
+}
+
+pub(crate) async fn load_in_tx(mut tx: Transaction<'static, Postgres>, with_rows: bool) -> ApiResult<Loaded> {
     let source = read_repo::import_state(&mut tx).await?;
     let source = match source {
         Some(s) if s.last_success_at.is_some() => s,
@@ -98,7 +101,15 @@ pub(crate) fn context(state: &AppState, now: DateTime<Utc>) -> ProjectionContext
 
 /// Полный снимок (`Snapshot`); тот же объект — в событии `snapshot` SSE ([`sse::DbJournal`]).
 pub async fn build_snapshot(state: &AppState) -> ApiResult<Value> {
+    build_snapshot_with_view(state, false).await
+}
+
+pub(crate) async fn build_snapshot_with_view(state: &AppState, web: bool) -> ApiResult<Value> {
     let mut loaded = load(state, true).await?;
+    snapshot_value(state, &mut loaded, web).await
+}
+
+pub(crate) async fn snapshot_value(state: &AppState, loaded: &mut Loaded, web: bool) -> ApiResult<Value> {
     let now = (state.clock)();
     let ctx = context(state, now);
     let (groups, projections) = project_all(&loaded.rows, &ctx);
@@ -115,11 +126,16 @@ pub async fn build_snapshot(state: &AppState) -> ApiResult<Value> {
         .last_change_at
         .or(loaded.state.last_success_at)
         .expect("last_success_at проверен в load");
+    let project = if web {
+        proj::web_incident_item
+    } else {
+        proj::incident_item
+    };
     Ok(json!({
         "revision": loaded.revision,
         "serverTime": proj::format_utc(&now),
         "updatedAt": proj::format_utc(&updated_at),
-        "items": projections.iter().map(proj::incident_item).collect::<Vec<_>>(),
+        "items": projections.iter().map(project).collect::<Vec<_>>(),
         "events": events.iter().map(proj::change_event_view).collect::<Vec<_>>(),
         "source": proj::source_info(&loaded.state),
         "itsmUrlTemplate": ctx.itsm_url_template,
@@ -128,8 +144,9 @@ pub async fn build_snapshot(state: &AppState) -> ApiResult<Value> {
     }))
 }
 
-pub async fn snapshot(State(state): State<AppState>) -> ApiResult<PyJson> {
-    Ok(PyJson(build_snapshot(&state).await?))
+pub async fn snapshot(State(state): State<AppState>, OriginalUri(uri): OriginalUri) -> ApiResult<PyJson> {
+    let web = Params::new(&uri).query_raw("view") == Some("web");
+    Ok(PyJson(build_snapshot_with_view(&state, web).await?))
 }
 
 // ------------------------------------------------------------------ /dashboard (ARCHITECTURE.md)
@@ -158,6 +175,9 @@ pub async fn list_incidents(
     OriginalUri(uri): OriginalUri,
 ) -> ApiResult<PyJson> {
     let mut p = Params::new(&uri);
+    if crate::web_queue::is_page_request(&p) {
+        return crate::web_queue::list(&state, p).await;
+    }
     let q = p.query_str("q", Some(200));
     let group = p.query_enum("group", GroupKey::ALL, GroupKey::as_str);
     let st = p.query_enum("state", NormalizedState::ALL, NormalizedState::as_str);
@@ -195,7 +215,7 @@ pub async fn list_incidents(
 }
 
 /// Ключ из пути: `Path(min_length=1, max_length=64)`.
-fn path_key(p: &mut Params, uri: &Uri) -> Option<String> {
+pub(crate) fn path_key(p: &mut Params, uri: &Uri) -> Option<String> {
     let segment = uri.path().split('/').nth(4).unwrap_or("");
     p.path_str("key", params::decode_path_segment(segment), 64)
 }
@@ -227,7 +247,7 @@ pub async fn get_incident(State(state): State<AppState>, OriginalUri(uri): Origi
     })))
 }
 
-fn incident_not_found() -> AppError {
+pub(crate) fn incident_not_found() -> AppError {
     AppError::not_found("Инцидент не найден").with_code("INCIDENT_NOT_FOUND")
 }
 
@@ -354,6 +374,7 @@ pub async fn stream_events(
     let broadcaster = state.broadcaster();
     let mut p = Params::new(&uri);
     let mode = p.query_literal("mode", STREAM_MODES).unwrap_or("snapshot");
+    let web = p.query_raw("view") == Some("web");
     let since = p.query_str("since", Some(32));
     let last_event_id = p.header_str(&headers, "Last-Event-ID", 32);
     p.finish()?;
@@ -361,7 +382,7 @@ pub async fn stream_events(
     let stream = if mode == "notify" {
         sse::notify_stream(&broadcaster, stream_cursor(last_event_id, since), heartbeat)
     } else {
-        sse::snapshot_stream(&broadcaster, heartbeat)
+        sse::snapshot_stream_with_view(&broadcaster, heartbeat, web)
     };
     Ok(stream.into_response())
 }

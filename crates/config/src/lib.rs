@@ -51,6 +51,7 @@ pub struct Settings {
     pub log_level: String,
     pub cors_origins: Vec<String>,
     pub default_user_id: String,
+    pub assignment_token: Option<String>,
 
     // --- HTTP (только Rust-версия: у Python адрес задаётся аргументами uvicorn) ---
     pub api_host: String,
@@ -215,6 +216,7 @@ impl Settings {
             log_level: r.string("log_level", "INFO"),
             cors_origins,
             default_user_id: r.string("default_user_id", "coordinator"),
+            assignment_token: vars.get("assignment_token").filter(|s| !s.is_empty()).cloned(),
             api_host: r.string("api_host", "0.0.0.0"),
             api_port: r.number("api_port", 8080u16, |_| true, ""),
             database_url,

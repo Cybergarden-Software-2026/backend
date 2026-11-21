@@ -36,11 +36,16 @@ impl Res {
 
 impl Api {
     async fn new() -> Option<Self> {
-        let e = Env::with_vars(&[
+        Self::with_vars(&[]).await
+    }
+
+    async fn with_vars(extra: &[(&str, &str)]) -> Option<Self> {
+        let mut vars = vec![
             ("ITSM_BASE_URL", "https://itsm.example"),
             ("ITSM_URL_TEMPLATE", "{base_url}/incidents/{sysId}"),
-        ])
-        .await?;
+        ];
+        vars.extend_from_slice(extra);
+        let e = Env::with_vars(&vars).await?;
         let app = router(AppState::with_clock(
             Arc::clone(&e.settings),
             e.pool().clone(),
@@ -50,16 +55,15 @@ impl Api {
     }
 
     async fn request(&self, method: &str, path: &str, headers: &[(&str, &str)]) -> Res {
+        self.send(method, path, headers, Body::empty()).await
+    }
+
+    async fn send(&self, method: &str, path: &str, headers: &[(&str, &str)], body: Body) -> Res {
         let mut b = Request::builder().method(method).uri(format!("/api/v1{path}"));
         for (k, v) in headers {
             b = b.header(*k, *v);
         }
-        let res = self
-            .app
-            .clone()
-            .oneshot(b.body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let res = self.app.clone().oneshot(b.body(body).unwrap()).await.unwrap();
         let status = res.status().as_u16();
         let content_type = res
             .headers()
@@ -75,6 +79,20 @@ impl Api {
 
     async fn get(&self, path: &str) -> Res {
         self.request("GET", path, &[]).await
+    }
+
+    async fn assign(&self, sys_id: &str, team: &str, revision: i64, authorization: Option<&str>) -> Res {
+        let mut headers = vec![("Content-Type", "application/json")];
+        if let Some(value) = authorization {
+            headers.push(("Authorization", value));
+        }
+        self.send(
+            "POST",
+            &format!("/incidents/{sys_id}/assignment"),
+            &headers,
+            Body::from(json!({"team":team,"expectedRevision":revision}).to_string()),
+        )
+        .await
     }
 
     async fn json(&self, path: &str) -> Value {
@@ -355,6 +373,209 @@ async fn incident_list_bad_params() {
         assert_eq!(r.status, 400, "{query}");
         assert_eq!(r.json()["code"], code, "{query}");
     }
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn web_queue_filters_before_paging_and_analysis_uses_completed_evidence() {
+    let mut api = api!();
+    let mut recs = records();
+    recs.truncate(4);
+    for (idx, r) in recs.iter_mut().enumerate() {
+        update(
+            r,
+            &[
+                ("header", s("Ошибка камеры")),
+                ("priorityId", json!(4)),
+                ("service", s("scan")),
+                ("stateEnum", s("Assigned")),
+                ("stateId", json!(0)),
+                ("assignedGroupName", s("")),
+                ("deadline", s("2026-11-20T12:30:00Z")),
+                ("id", s(&format!("INC{idx}"))),
+            ],
+        );
+    }
+    update(
+        &mut recs[2],
+        &[("stateEnum", s("Research")), ("stateId", json!(20))],
+    );
+    update(
+        &mut recs[3],
+        &[
+            ("stateEnum", s("Closed")),
+            ("stateId", json!(10)),
+            ("assignedGroupName", s("Команда А")),
+            ("completionDate", s("2026-11-20T12:00:00Z")),
+        ],
+    );
+    api.imported(&recs).await;
+
+    let path = "/incidents?group=critical&pageSize=1&page=99&priority=4&status=Assigned&team=__unassigned__&sla=soon&q=sCan&sort=deadline";
+    let page = api.json(path).await;
+    assert_eq!(page["total"], 2);
+    assert_eq!(page["totalPages"], 2);
+    assert_eq!(page["page"], 2);
+    assert_eq!(page["pageSize"], 1);
+    assert_eq!(page["items"][0]["id"], "INC1");
+    let empty = api.json("/incidents?page=2&group=critical&sla=closed").await;
+    assert_eq!(empty["page"], 1);
+    assert_eq!(empty["totalPages"], 1);
+    assert_eq!(empty["items"], json!([]));
+    let research = api.json("/incidents?group=all&sla=research&sort=newest").await;
+    assert_eq!(research["items"][0]["id"], "INC2");
+
+    let sys_id = recs[0]["sysId"].as_str().unwrap();
+    let analysis = api.json(&format!("/incidents/{sys_id}/analysis")).await;
+    assert_eq!(analysis["sysId"], sys_id);
+    assert_eq!(analysis["revision"], page["revision"]);
+    assert_eq!(analysis["provider"], "rules");
+    assert_eq!(analysis["candidates"][0]["team"], "Команда А");
+    assert_eq!(analysis["candidates"][0]["evidenceIds"], json!(["INC3"]));
+    assert_eq!(api.get("/incidents/unknown/analysis").await.status, 404);
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn assignments_require_a_configured_coordinator_token() {
+    let api = api!();
+    let res = api.assign("1", "Team A", 1, Some("Bearer local-test")).await;
+    assert_eq!(res.status, 403);
+    assert_eq!(res.json()["code"], "ASSIGNMENT_DISABLED");
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn assignments_are_atomic_and_reconciled_with_subsequent_imports() {
+    let Some(mut api) = Api::with_vars(&[("ASSIGNMENT_TOKEN", "local-test")]).await else {
+        return;
+    };
+    let bearer = Some("Bearer local-test");
+    let mut recs = records();
+    recs.truncate(4);
+    let initial_team = "Duty";
+    for (row, (team, state, state_id)) in recs.iter_mut().zip([
+        (initial_team, "Assigned", 0),
+        ("Team A", "WorkInProgress", 2),
+        ("Team B", "Closed", 10),
+        ("AutoClosedMi", "Closed", 10),
+    ]) {
+        update(
+            row,
+            &[
+                ("assignedGroupName", s(team)),
+                ("stateEnum", s(state)),
+                ("stateId", json!(state_id)),
+            ],
+        );
+    }
+    update(
+        &mut recs[0],
+        &[
+            ("assignedEmployee", s("Duty operator")),
+            ("assignedEmployeeLogin", s("operator")),
+        ],
+    );
+    api.imported(&recs).await;
+    let id = recs[0]["sysId"].as_str().unwrap().to_owned();
+    let closed = recs[2]["sysId"].as_str().unwrap();
+    let teams = api.json("/teams").await;
+    assert_eq!(teams["revision"], 1);
+    assert_eq!(
+        teams["items"],
+        json!([
+            {"name":"Duty","activeCount":1}, {"name":"Team A","activeCount":1}, {"name":"Team B","activeCount":0}
+        ])
+    );
+    assert_eq!(api.assign(&id, "Team A", 1, None).await.status, 401);
+    assert_eq!(
+        api.assign(&id, "Team A", 1, Some("Bearer other-key"))
+            .await
+            .status,
+        401
+    );
+    assert_eq!(api.assign(closed, "Team A", 1, bearer).await.status, 409);
+    assert_eq!(api.assign(&id, "Unknown", 1, bearer).await.status, 400);
+    assert_eq!(api.assign("missing", "Team B", 1, bearer).await.status, 404);
+
+    let (left, right) = tokio::join!(
+        api.assign(&id, "Team A", 1, bearer),
+        api.assign(&id, "Team B", 1, bearer),
+    );
+    let (ok, conflict, winning_team) = if left.status == 200 {
+        (left, right, "Team A")
+    } else {
+        (right, left, "Team B")
+    };
+    assert_eq!(ok.status, 200, "{}", ok.json());
+    assert_eq!(conflict.status, 409);
+    assert_eq!(conflict.json()["currentRevision"], 2);
+    let snapshot = ok.json();
+    assert_eq!(snapshot["revision"], 2);
+    assert_eq!(snapshot["items"].as_array().unwrap().len(), recs.len());
+    let assigned = snapshot["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["sysId"] == id)
+        .unwrap();
+    assert_eq!(assigned["assignedGroupName"], winning_team);
+    assert_eq!(assigned["assignedEmployee"], "");
+    assert_eq!(assigned["assignedEmployeeLogin"], "");
+    assert_eq!(assigned["stateEnum"], "Assigned");
+    assert_ne!(
+        assigned["lastAssignmentToTeamDateTime"],
+        recs[0]["lastAssignmentToTeamDateTime"]
+    );
+    let events = snapshot["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["revision"] == 2)
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["previous"]["assignedGroupName"], initial_team);
+    assert_eq!(events[0]["current"]["assignedGroupName"], winning_team);
+    assert!(events[0]["types"].as_array().unwrap().contains(&s("team")));
+
+    // Reimport with fresh source data while the source assignment itself is unchanged.
+    recs[1].insert("header".into(), s("Source-side update"));
+    api.imported(&recs).await;
+    let snapshot = api.json("/snapshot").await;
+    let retained = snapshot["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["sysId"] == id)
+        .unwrap();
+    assert_eq!(retained["assignedGroupName"], winning_team);
+    assert_eq!(
+        retained["lastAssignmentToTeamDateTime"],
+        assigned["lastAssignmentToTeamDateTime"]
+    );
+
+    update(
+        &mut recs[0],
+        &[
+            ("assignedGroupName", s("External")),
+            ("assignedEmployee", s("External operator")),
+        ],
+    );
+    api.imported(&recs).await;
+    let snapshot = api.json("/snapshot").await;
+    let external = snapshot["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["sysId"] == id)
+        .unwrap();
+    assert_eq!(external["assignedGroupName"], "External");
+    assert_eq!(external["assignedEmployee"], "External operator");
+    let teams = api.json("/teams").await;
+    assert_eq!(teams["revision"], snapshot["revision"]);
+    let items = teams["items"].as_array().unwrap();
+    assert!(items.contains(&json!({"name":"Duty","activeCount":0})));
+    assert!(items.contains(&json!({"name":"External","activeCount":1})));
     api.finish().await;
 }
 

@@ -78,7 +78,21 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "web"
+              ]
+            },
+            "description": "Включить dashboard.sourceDates с датами, интерпретированными в часовом поясе источника и приведёнными к UTC."
+          }
+        ]
       }
     },
     "/api/v1/dashboard": {
@@ -144,15 +158,16 @@
             "in": "query",
             "required": false,
             "schema": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/GroupKey"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Group"
+              "type": "string",
+              "enum": [
+                "critical",
+                "coordinators",
+                "high",
+                "research",
+                "all",
+                "resolved",
+                "closed"
+              ]
             }
           },
           {
@@ -243,12 +258,64 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string",
-              "description": "deadline | -deadline | submitDate | -submitDate | priority | id",
-              "default": "deadline",
-              "title": "Sort"
+              "type": "string"
             },
-            "description": "deadline | -deadline | submitDate | -submitDate | priority | id"
+            "description": "Страницы: priority (по умолчанию), deadline, newest. Курсор: deadline (по умолчанию), -deadline, submitDate, -submitDate, priority, -priority, id."
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 9
+            }
+          },
+          {
+            "name": "priority",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/NormalizedState"
+            }
+          },
+          {
+            "name": "sla",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "late",
+                "soon",
+                "normal",
+                "unknown",
+                "research",
+                "restored",
+                "closed"
+              ]
+            }
           }
         ],
         "responses": {
@@ -257,7 +324,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/IncidentList"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/QueuePage"
+                    },
+                    {
+                      "$ref": "#/components/schemas/IncidentList"
+                    }
+                  ]
                 }
               }
             }
@@ -302,7 +376,8 @@
               }
             }
           }
-        }
+        },
+        "description": "Параметр page или pageSize выбирает постраничную очередь веб-клиента. Её также включают priority, status, sla, sort=newest, group=all/resolved/closed и team=__unassigned__. Прежний режим с limit/cursor сохраняет курсорную пагинацию."
       }
     },
     "/api/v1/incidents/{key}": {
@@ -534,6 +609,18 @@
               ],
               "title": "Last-Event-Id"
             }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "web"
+              ]
+            },
+            "description": "Включить dashboard.sourceDates с датами, интерпретированными в часовом поясе источника и приведёнными к UTC."
           }
         ],
         "responses": {
@@ -864,6 +951,203 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/incidents/{key}/analysis": {
+      "get": {
+        "tags": [
+          "incidents"
+        ],
+        "summary": "Разбор инцидента с основаниями по текущему снимку",
+        "operationId": "get_incident_analysis",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "description": "sysId инцидента"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Анализ по правилам",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentAnalysis"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректные параметры",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Первый снимок ещё не принят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/teams": {
+      "get": {
+        "summary": "Справочник команд с текущей нагрузкой",
+        "operationId": "web_teams",
+        "responses": {
+          "200": {
+            "description": "Сохранённый справочник команд",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamDirectory"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Ожидается первый снимок",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/incidents/{key}/assignment": {
+      "post": {
+        "summary": "Назначить команду по sysId",
+        "operationId": "web_assign_team",
+        "security": [
+          {
+            "CoordinatorKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "sysId инцидента"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignmentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Снимок после назначения",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректный запрос или неизвестная команда",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Требуется ключ координатора",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Назначения отключены",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Инцидент отсутствует",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Устаревший снимок или инцидент завершён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Ожидается первый снимок",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1324,6 +1608,54 @@
           "updatedAt": {
             "type": "string",
             "title": "Updatedat"
+          },
+          "sourceDates": {
+            "type": "object",
+            "properties": {
+              "submitDate": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "deadline": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "completionDate": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "lastAssignmentToTeamDateTime": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "submitDate",
+              "deadline",
+              "completionDate",
+              "lastAssignmentToTeamDateTime"
+            ]
           }
         },
         "type": "object",
@@ -2707,6 +3039,185 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "QueuePage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IncidentItem"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "page": {
+            "type": "integer"
+          },
+          "pageSize": {
+            "type": "integer"
+          },
+          "totalPages": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "page",
+          "pageSize",
+          "totalPages",
+          "revision"
+        ]
+      },
+      "IncidentAnalysis": {
+        "type": "object",
+        "properties": {
+          "sysId": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "rules"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "facts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "label",
+                "value"
+              ]
+            }
+          },
+          "attention": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "team": {
+                  "type": "string"
+                },
+                "evidenceIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "team",
+                "evidenceIds",
+                "reason"
+              ]
+            }
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "sysId",
+          "revision",
+          "generatedAt",
+          "provider",
+          "summary",
+          "facts",
+          "attention",
+          "candidates",
+          "missing"
+        ]
+      },
+      "TeamDirectory": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "activeCount": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "name",
+                "activeCount"
+              ]
+            }
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "items",
+          "revision"
+        ]
+      },
+      "AssignmentRequest": {
+        "type": "object",
+        "properties": {
+          "team": {
+            "type": "string"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "team",
+          "expectedRevision"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "CoordinatorKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Ключ для назначения команд, заданный на сервере в ASSIGNMENT_TOKEN."
       }
     }
   }

@@ -75,12 +75,10 @@ impl Journal for FakeJournal {
                 return Ok(None);
             }
             let rev = self.max_id.load(Ordering::SeqCst);
-            Ok(Some(BuiltSnapshot {
-                revision: rev,
-                json: serde_json::to_string(&json!({"revision": rev, "items": []}))
-                    .unwrap()
-                    .into(),
-            }))
+            Ok(Some(dashboard_api::sse::snapshot_from_value(
+                rev,
+                &json!({"revision": rev, "items": []}),
+            )))
         })
     }
 }
@@ -253,6 +251,21 @@ async fn test_snapshot_built_once_per_revision_for_many_clients() {
     b.stop();
     assert_eq!(j.builds.load(Ordering::SeqCst), 1);
     assert!(results.iter().all(|r| parse(&r[1])["id"] == "7"));
+}
+
+#[tokio::test]
+async fn snapshot_stream_uses_reinitialized_database() {
+    let j = FakeJournal::simple(9);
+    let b = broadcaster(&j);
+    let mut existing = snapshot_stream(&b, HB);
+    take(&mut existing, 2).await;
+    j.set(1);
+    b.refresh().await.unwrap();
+    let update = take(&mut existing, 1).await;
+    let reconnect = take(&mut snapshot_stream(&b, HB), 2).await;
+    b.stop();
+    assert_eq!(data(&update[0])["revision"], 1);
+    assert_eq!(data(&reconnect[1])["revision"], 1);
 }
 
 #[tokio::test]
