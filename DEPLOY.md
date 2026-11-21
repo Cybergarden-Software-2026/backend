@@ -48,8 +48,7 @@ docker version && docker compose version
 sudo ufw allow 22,80,443/tcp && sudo ufw enable
 ```
 
-Python, Rust и PostgreSQL на сервер ставить не нужно. Python 3 нужен только для `tools/demo.py`
-(сценарий демонстрации), если его запускать на сервере.
+Rust и PostgreSQL на сервер ставить не нужно. Python 3 нужен для проверки снимка при автодеплое и для `tools/demo.py`, если запускать сценарий демонстрации на сервере.
 
 ## 3. Настройка перед первым запуском
 
@@ -96,7 +95,7 @@ docker compose logs -f importer         # «Снимок принят: revision=
 ## Запуск на vserver
 
 Для этого варианта используйте Docker Engine 28 или новее и Docker Compose
-2.24.4 или новее. Назначения обрабатывает API без ключа. Из корня репозитория с настроенным `.env` выполните:
+2.24.4 или новее. Из корня репозитория с настроенным `.env` выполните:
 
 ```bash
 dc() { sudo docker compose -f docker-compose.yml -f compose.vserver.yml "$@"; }
@@ -112,6 +111,30 @@ API слушает порт `8080` внутри контейнера и дост
 `127.0.0.1:8080` используется Qwen. В выводе `dc ps --all` ожидаются
 `Exited (0)` для миграции и `healthy` для API после запуска. Готовность
 проверяется ответом `"database":true` на `/health/ready`.
+
+### Вход координатора на vserver
+
+1. Обновите backend, пока `COORDINATOR_ACCESS_KEY` не задан, затем обновите frontend. До включения ключа `GET /api/v1/auth/coordinator/session` возвращает `required: false`.
+2. Переустановите backend-службу автодеплоя по инструкции ниже. Обновлённая служба проверяет снимок через настоящую сессию, когда вход включён.
+3. Сгенерируйте ключ командой `openssl rand -hex 32` на стороне администратора и задайте его в `~/cybergarden/backend/.env` как `COORDINATOR_ACCESS_KEY`. Добавьте `https://cybergarden.sosmooth.ru` в список `CORS_ORIGINS`, сохранив нужные адреса. Значение ключа передавайте координаторам отдельно.
+4. Пересоздайте контейнер `api` с обновлённым `.env`. Если установлен автодеплой, выполните команды ниже из `~/cybergarden/backend`. Для ручного запуска используйте `dc up -d --no-build --no-deps --force-recreate api` из раздела выше. Откройте сайт по HTTPS. API покажет `required: true`, а запрос к снимку без сессии получит `401`.
+
+```bash
+sudo flock -n /run/lock/underctrl-backend-deploy.lock bash -euo pipefail <<'RECREATE_API'
+api_container=$(docker ps -q --filter label=com.docker.compose.project=mts-incident-dashboard \
+  --filter label=com.docker.compose.service=api)
+test -n "$api_container"
+api_image=$(docker container inspect --format '{{.Config.Image}}' "$api_container")
+UNDERCTRL_BACKEND_IMAGE="$api_image" docker compose \
+  --project-name mts-incident-dashboard --project-directory "$PWD" --env-file .env \
+  -f /etc/underctrl-backend-deploy/docker-compose.yml \
+  -f /etc/underctrl-backend-deploy/compose.vserver.yml \
+  -f /etc/underctrl-backend-deploy/compose.image.yml \
+  up -d --no-build --no-deps --force-recreate api
+RECREATE_API
+```
+
+Фронтенд использует существующий прокси `/api/v1`. Nginx передаёт `Cookie` и `Set-Cookie` в стандартной конфигурации. Cookie входа привязана к HTTPS-хосту, через который координатор выполнил вход. Смена ключа и пересоздание `api` завершают ранее выданные сессии.
 
 ## Автодеплой из main на vserver
 

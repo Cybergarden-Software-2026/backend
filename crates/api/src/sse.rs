@@ -34,6 +34,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::AppState;
+use crate::coordinator_session::ActiveSession;
 
 pub const RETRY_MS: u32 = 2000;
 pub const HEARTBEAT: &str = ": heartbeat\n\n";
@@ -336,13 +337,21 @@ impl futures_core::Stream for ChunkStream {
 /// Отправка кусков из задачи потока. `Err(Closed)` — клиент отключился.
 pub struct Sink {
     tx: mpsc::Sender<Result<String, std::io::Error>>,
+    session: Option<ActiveSession>,
 }
 
 pub struct Closed;
 
 impl Sink {
     async fn send(&self, chunk: String) -> Result<(), Closed> {
-        self.tx.send(Ok(chunk)).await.map_err(|_| Closed)
+        let permit = self.tx.reserve().await.map_err(|_| Closed)?;
+        if let Some(session) = &self.session
+            && !session.is_valid().await.unwrap_or(false)
+        {
+            return Err(Closed);
+        }
+        permit.send(Ok(chunk));
+        Ok(())
     }
 }
 
@@ -363,7 +372,7 @@ impl From<anyhow::Error> for Stop {
     }
 }
 
-fn spawn_stream<F, Fut>(broadcaster: &Arc<Broadcaster>, body: F) -> SseStream
+fn spawn_stream<F, Fut>(broadcaster: &Arc<Broadcaster>, session: Option<ActiveSession>, body: F) -> SseStream
 where
     F: FnOnce(Sink) -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), Stop>> + Send + 'static,
@@ -372,7 +381,10 @@ where
     let mut closing = broadcaster.closing.subscribe();
     let watcher = tx.clone();
     tokio::spawn(async move {
-        let run = body(Sink { tx: tx.clone() });
+        let run = body(Sink {
+            tx: tx.clone(),
+            session,
+        });
         let result = tokio::select! {
             r = run => r,
             () = watcher.closed() => Err(Stop::Closed),
@@ -388,16 +400,17 @@ where
 
 /// Режим API.md: снимок сразу и при каждой новой ревизии.
 pub fn snapshot_stream(broadcaster: &Arc<Broadcaster>, heartbeat: Duration) -> SseStream {
-    snapshot_stream_with_view(broadcaster, heartbeat, false)
+    snapshot_stream_with_view(broadcaster, heartbeat, false, None)
 }
 
 pub(crate) fn snapshot_stream_with_view(
     broadcaster: &Arc<Broadcaster>,
     heartbeat: Duration,
     web: bool,
+    session: Option<ActiveSession>,
 ) -> SseStream {
     let b = Arc::clone(broadcaster);
-    spawn_stream(broadcaster, move |sink| async move {
+    spawn_stream(broadcaster, session, move |sink| async move {
         sink.send(retry_line()).await?;
         let mut sent: Option<i64> = None;
         let mut known = b.refresh().await?.max_id;
@@ -475,8 +488,17 @@ pub fn notify_stream(
     cursor: Option<String>,
     heartbeat: Duration,
 ) -> SseStream {
+    notify_stream_with_session(broadcaster, cursor, heartbeat, None)
+}
+
+pub(crate) fn notify_stream_with_session(
+    broadcaster: &Arc<Broadcaster>,
+    cursor: Option<String>,
+    heartbeat: Duration,
+    session: Option<ActiveSession>,
+) -> SseStream {
     let b = Arc::clone(broadcaster);
-    spawn_stream(broadcaster, move |sink| async move {
+    spawn_stream(broadcaster, session, move |sink| async move {
         sink.send(retry_line()).await?;
         let head = b.refresh().await?;
         match plan_notify_start(cursor.as_deref(), &head) {
