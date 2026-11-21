@@ -112,3 +112,46 @@ API слушает порт `8080` внутри контейнера и дост
 `127.0.0.1:8080` используется Qwen. В выводе `dc ps --all` ожидаются
 `Exited (0)` для миграции и `healthy` для API после запуска. Готовность
 проверяется ответом `"database":true` на `/health/ready`.
+
+## Автодеплой из main на vserver
+
+GitHub Actions проверяет PR в `main` и push в `main`. На сервере systemd раз
+в минуту проверяет `main` существующим ключом чтения пользователя `cyber`.
+Сервер архивирует точный коммит, прогоняет Rust-тесты в отдельном контейнере
+с временной PostgreSQL и собирает runtime-образ только после успешных тестов.
+
+Служба использует существующий проект `mts-incident-dashboard`, его том
+`pgdata`, параметры из `~/cybergarden/backend/.env` и импортируемый каталог
+`~/cybergarden/backend/data`. Перед миграцией сохраняется дамп в
+`/var/lib/underctrl-backend-deploy/backups/`. После замены API и импортёра
+служба проверяет готовность и снимок на `127.0.0.1:8001`. Если проверка
+провалилась, она пробует вернуть предыдущие образы. Для такого отката
+миграция должна быть совместима с предыдущей версией приложения.
+
+После слияния автодеплоя в `main` выполните под `cyber`. Команды забирают
+файлы установки во временный каталог, сохраняя рабочий каталог с выгрузкой.
+
+```bash
+(
+  set -euo pipefail
+  repo="$HOME/cybergarden/backend"
+  git -C "$repo" fetch origin
+  files=$(mktemp -d)
+  trap 'rm -rf -- "$files"' EXIT
+  git -C "$repo" archive origin/main deploy docker-compose.yml compose.vserver.yml |
+    tar -xf - -C "$files"
+  sudo "$files/deploy/install-backend-deploy.sh"
+  sudo systemctl start underctrl-backend-deploy.service
+  sudo systemctl enable --now underctrl-backend-deploy.timer
+)
+```
+
+Журнал первого и последующих запусков:
+
+```bash
+sudo journalctl -u underctrl-backend-deploy.service -n 80 --no-pager
+```
+
+При изменении самой конфигурации Compose повторите установку файлов
+из проверенного коммита `main`. Автоматический цикл использует параметры
+Compose, установленные владельцем сервера в `/etc/underctrl-backend-deploy`.
