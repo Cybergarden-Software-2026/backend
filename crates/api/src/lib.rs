@@ -10,6 +10,7 @@
 
 mod analysis;
 pub mod assignments;
+pub mod coordinator_accounts;
 mod coordinator_session;
 pub mod dashboard;
 pub mod demo;

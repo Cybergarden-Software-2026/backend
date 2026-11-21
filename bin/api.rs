@@ -4,6 +4,8 @@
 
 #[path = "common.rs"]
 mod common;
+#[path = "api_coordinator.rs"]
+mod coordinator;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -13,7 +15,11 @@ use dashboard_api::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if std::env::args().any(|a| a == "--healthcheck") {
+    let mut arguments = std::env::args().skip(1).peekable();
+    if arguments.next_if(|argument| argument == "coordinator").is_some() {
+        return coordinator::run(arguments.collect()).await;
+    }
+    if arguments.any(|argument| argument == "--healthcheck") {
         std::process::exit(healthcheck());
     }
 

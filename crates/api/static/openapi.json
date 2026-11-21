@@ -1047,7 +1047,8 @@
                 }
               ],
               "title": "X-User-Id"
-            }
+            },
+            "description": "Ignored in accounts mode. Read state uses the authenticated coordinator account."
           }
         ],
         "responses": {
@@ -1119,7 +1120,8 @@
                 }
               ],
               "title": "X-User-Id"
-            }
+            },
+            "description": "Ignored in accounts mode. Read state uses the authenticated coordinator account."
           }
         ],
         "responses": {
@@ -1336,7 +1338,8 @@
           "403": {
             "$ref": "#/components/responses/CoordinatorOriginForbidden"
           }
-        }
+        },
+        "description": "In accounts mode the server attributes the assignment to the authenticated coordinator login."
       }
     },
     "/api/v1/statistics/shift": {
@@ -1514,9 +1517,9 @@
         "security": []
       },
       "post": {
-        "summary": "Sign in with the coordinator key",
+        "summary": "Sign in as a coordinator",
         "operationId": "coordinator_session_create",
-        "description": "Returns an inactive status when coordinator access is disabled. A successful sign-in issues a 12-hour session or a remembered seven-day session.",
+        "description": "In accounts mode, use a personal key or a login and password. Shared-key mode accepts only the configured shared key. Returns an inactive status when coordinator access is disabled. Successful sign-in issues a 12-hour session or a remembered seven-day session.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1557,7 +1560,7 @@
             }
           },
           "401": {
-            "description": "The coordinator key is invalid (COORDINATOR_UNAUTHORIZED).",
+            "description": "Invalid credentials or disabled account (COORDINATOR_UNAUTHORIZED).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1568,6 +1571,16 @@
           },
           "403": {
             "$ref": "#/components/responses/CoordinatorOriginForbidden"
+          },
+          "429": {
+            "description": "Too many simultaneous password checks (COORDINATOR_LOGIN_BUSY).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         },
         "security": []
@@ -3998,26 +4011,82 @@
           "authenticated": {
             "type": "boolean",
             "description": "Whether the request has a valid session."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "accounts",
+              "shared-key",
+              "none"
+            ],
+            "description": "Authentication mode selected by the server. Accounts mode requires authentication even before provisioning."
+          },
+          "coordinator": {
+            "$ref": "#/components/schemas/CoordinatorIdentity"
           }
         }
       },
       "CoordinatorLogin": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "key",
+              "remember"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              "remember": {
+                "type": "boolean",
+                "description": "Issue a persistent seven-day cookie."
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "login",
+              "password",
+              "remember"
+            ],
+            "properties": {
+              "login": {
+                "type": "string"
+              },
+              "password": {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              "remember": {
+                "type": "boolean",
+                "description": "Issue a persistent seven-day cookie."
+              }
+            }
+          }
+        ]
+      },
+      "CoordinatorIdentity": {
         "type": "object",
         "required": [
-          "key",
-          "remember"
+          "login",
+          "displayName"
         ],
         "properties": {
-          "key": {
-            "type": "string",
-            "format": "password",
-            "writeOnly": true
+          "login": {
+            "type": "string"
           },
-          "remember": {
-            "type": "boolean",
-            "description": "Issue a persistent seven-day cookie."
+          "displayName": {
+            "type": "string"
           }
-        }
+        },
+        "description": "Present only for an authenticated individual account."
       }
     },
     "securitySchemes": {

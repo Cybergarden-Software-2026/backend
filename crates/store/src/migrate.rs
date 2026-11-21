@@ -66,6 +66,12 @@ pub const MIGRATIONS: &[SharedMigration] = &[
         description: "coordinator sessions",
         sql: include_str!("../../../migrations/0005_coordinator_sessions_up.sql"),
     },
+    SharedMigration {
+        version: 6,
+        alembic_revision: "0006",
+        description: "individual coordinator accounts",
+        sql: include_str!("../../../migrations/0006_coordinator_accounts_up.sql"),
+    },
 ];
 
 /// Ключ advisory lock миграций («MTS» + 2), чтобы два процесса `migrate` не синхронизировали

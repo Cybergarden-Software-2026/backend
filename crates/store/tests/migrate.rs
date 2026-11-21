@@ -98,6 +98,7 @@ fn replace_db_name(url: &str, name: &str) -> String {
 const SCHEMA_TABLES: &[&str] = &[
     "analysis_jobs",
     "assignment_overrides",
+    "coordinator_accounts",
     "coordinator_sessions",
     "teams",
     "change_events",
@@ -121,9 +122,9 @@ async fn empty_database_is_migrated_and_marked_for_alembic() {
     let Some(db) = TempDb::create().await else { return };
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![1, 2, 3, 4, 5]);
+    assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6]);
     assert!(report.adopted_from_alembic.is_empty());
-    assert_eq!(report.alembic_revision.as_deref(), Some("0005"));
+    assert_eq!(report.alembic_revision.as_deref(), Some("0006"));
 
     assert_eq!(
         db.tables().await,
@@ -133,7 +134,7 @@ async fn empty_database_is_migrated_and_marked_for_alembic() {
     assert_eq!(
         db.scalar_strings("SELECT version_num::text FROM alembic_version")
             .await,
-        vec!["0005"]
+        vec!["0006"]
     );
     // Сид из SQL на месте.
     assert_eq!(
@@ -145,7 +146,7 @@ async fn empty_database_is_migrated_and_marked_for_alembic() {
     // Повторный запуск — без изменений.
     let again = migrate::run(&db.pool).await.unwrap();
     assert!(again.applied.is_empty() && again.adopted_from_alembic.is_empty());
-    assert_eq!(again.alembic_revision.as_deref(), Some("0005"));
+    assert_eq!(again.alembic_revision.as_deref(), Some("0006"));
 
     db.drop().await;
 }
@@ -179,10 +180,10 @@ async fn coordinator_sessions_upgrade_preserves_existing_cluster_reviews() {
     .unwrap();
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![5]);
+    assert_eq!(report.applied, vec![5, 6]);
     assert!(report.adopted_from_alembic.is_empty());
     assert!(report.reverted_by_alembic.is_empty());
-    assert_eq!(report.alembic_revision.as_deref(), Some("0005"));
+    assert_eq!(report.alembic_revision.as_deref(), Some("0006"));
     assert_eq!(
         db.scalar_strings("SELECT kind || ':' || model FROM analysis_jobs")
             .await,
@@ -199,6 +200,39 @@ async fn coordinator_sessions_upgrade_preserves_existing_cluster_reviews() {
 }
 
 #[tokio::test]
+async fn coordinator_accounts_upgrade_keeps_legacy_sessions_unlinked() {
+    let Some(db) = TempDb::create().await else { return };
+    let previous = Migrator::with_migrations(
+        migrate::migrator()
+            .migrations
+            .iter()
+            .filter(|migration| migration.version <= 5)
+            .cloned()
+            .collect(),
+    );
+    previous.run(&db.pool).await.unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO coordinator_sessions (token_hash, expires_at) \
+         VALUES (decode(repeat('aa', 32), 'hex'), now() + interval '1 hour');",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let report = migrate::run(&db.pool).await.unwrap();
+    assert_eq!(report.applied, vec![6]);
+    assert_eq!(report.alembic_revision.as_deref(), Some("0006"));
+    assert_eq!(
+        db.scalar_strings(
+            "SELECT encode(token_hash, 'hex') FROM coordinator_sessions WHERE account_login IS NULL"
+        )
+        .await,
+        vec!["aa".repeat(32)]
+    );
+    db.drop().await;
+}
+
+#[tokio::test]
 async fn database_created_by_alembic_is_adopted_without_running_sql() {
     let Some(db) = TempDb::create().await else { return };
     db.simulate_alembic().await;
@@ -209,9 +243,9 @@ async fn database_created_by_alembic_is_adopted_without_running_sql() {
         .unwrap();
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![2, 3, 4, 5]);
+    assert_eq!(report.applied, vec![2, 3, 4, 5, 6]);
     assert_eq!(report.adopted_from_alembic, vec![1]);
-    assert_eq!(report.alembic_revision.as_deref(), Some("0005"));
+    assert_eq!(report.alembic_revision.as_deref(), Some("0006"));
     assert_eq!(
         db.scalar_strings("SELECT status FROM import_state WHERE id = 1")
             .await,
@@ -262,11 +296,11 @@ async fn concurrent_runs_apply_once() {
     );
     let reports = [a.unwrap(), b.unwrap(), c.unwrap()];
     let applied: Vec<i64> = reports.iter().flat_map(|r| r.applied.clone()).collect();
-    assert_eq!(applied, vec![1, 2, 3, 4, 5]);
+    assert_eq!(applied, vec![1, 2, 3, 4, 5, 6]);
     assert_eq!(
         db.scalar_strings("SELECT version_num::text FROM alembic_version")
             .await,
-        vec!["0005"]
+        vec!["0006"]
     );
     db.drop().await;
 }
@@ -277,6 +311,12 @@ async fn concurrent_runs_apply_once() {
 async fn alembic_downgrade_is_respected() {
     let Some(db) = TempDb::create().await else { return };
     migrate::run(&db.pool).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0006_coordinator_accounts_down.sql"
+    ))
+    .execute(&db.pool)
+    .await
+    .unwrap();
     sqlx::raw_sql(include_str!(
         "../../../migrations/0005_coordinator_sessions_down.sql"
     ))
@@ -305,8 +345,8 @@ async fn alembic_downgrade_is_respected() {
         .unwrap();
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.reverted_by_alembic, vec![1, 2, 3, 4, 5]);
-    assert_eq!(report.applied, vec![1, 2, 3, 4, 5]);
+    assert_eq!(report.reverted_by_alembic, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6]);
     assert_eq!(
         db.tables().await,
         with_service_tables(&["_sqlx_migrations", "alembic_version"])
@@ -314,7 +354,7 @@ async fn alembic_downgrade_is_respected() {
     assert_eq!(
         db.scalar_strings("SELECT version_num::text FROM alembic_version")
             .await,
-        vec!["0005"]
+        vec!["0006"]
     );
     db.drop().await;
 }

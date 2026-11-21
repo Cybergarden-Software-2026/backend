@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+argon2 = "0.5"
 futures-core = "0.3"
 dashboard-config.workspace = true
 dashboard-store.workspace = true

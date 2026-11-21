@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+use crate::coordinator_accounts::{self, Coordinator};
 use crate::{ApiResult, AppError, AppState, Clock};
 
 const COOKIE_NAME: &str = "__Host-underctrl-coordinator";
@@ -15,15 +16,82 @@ const SESSION_SECONDS: i64 = 12 * 60 * 60;
 const REMEMBER_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 #[derive(Deserialize)]
-pub(crate) struct Login {
+#[serde(untagged)]
+pub(crate) enum Login {
+    Key(KeyLogin),
+    Password(PasswordLogin),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct KeyLogin {
     key: String,
     remember: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PasswordLogin {
+    login: String,
+    password: String,
+    remember: bool,
+}
+
+#[derive(Clone, Copy)]
+enum AuthMode<'a> {
+    Accounts,
+    SharedKey(&'a CoordinatorAccessKey),
+    None,
+}
+
+impl<'a> AuthMode<'a> {
+    fn from_settings(settings: &'a Settings) -> Self {
+        if settings.coordinator_accounts_enabled {
+            Self::Accounts
+        } else if let Some(key) = &settings.coordinator_access_key {
+            Self::SharedKey(key)
+        } else {
+            Self::None
+        }
+    }
+
+    fn required(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Accounts => "accounts",
+            Self::SharedKey(_) => "shared-key",
+            Self::None => "none",
+        }
+    }
+
+    fn token_hash(self, token: &[u8; 32]) -> Option<[u8; 32]> {
+        let digest = match self {
+            Self::Accounts => Sha256::new().chain_update(b"underctrl:individual-coordinator-session:v1\0"),
+            // Keep legacy tokens compatible during rollout. A configured key rotation invalidates them.
+            Self::SharedKey(key) => Sha256::new()
+                .chain_update(b"underctrl:coordinator-session:v1\0")
+                .chain_update(Sha256::digest(key.as_bytes())),
+            Self::None => return None,
+        };
+        Some(digest.chain_update(token).finalize().into())
+    }
 }
 
 #[derive(Serialize)]
 struct SessionStatus {
     required: bool,
     authenticated: bool,
+    mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coordinator: Option<Coordinator>,
+}
+
+enum SessionIdentity {
+    Account(Coordinator),
+    SharedKey,
 }
 
 #[derive(Clone)]
@@ -31,31 +99,41 @@ pub(crate) struct ActiveSession {
     pool: sqlx::PgPool,
     clock: Clock,
     hash: [u8; 32],
+    accounts: bool,
 }
 
 impl ActiveSession {
     pub(crate) async fn is_valid(&self) -> Result<bool, sqlx::Error> {
-        sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM coordinator_sessions WHERE token_hash = $1 AND expires_at > $2)",
+        Ok(self.identity().await?.is_some())
+    }
+
+    async fn identity(&self) -> Result<Option<SessionIdentity>, sqlx::Error> {
+        let now = (self.clock)();
+        if self.accounts {
+            let principal = sqlx::query_as::<_, (String, String)>(
+                "SELECT accounts.login, accounts.display_name FROM coordinator_sessions sessions \
+                 JOIN coordinator_accounts accounts ON accounts.login = sessions.account_login \
+                 WHERE sessions.token_hash = $1 AND sessions.expires_at > $2 AND accounts.disabled_at IS NULL",
+            )
+            .bind(self.hash.as_slice())
+            .bind(now)
+            .fetch_optional(&self.pool)
+            .await?;
+            return Ok(principal.map(|account| SessionIdentity::Account(account.into())));
+        }
+        let valid: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM coordinator_sessions \
+             WHERE token_hash = $1 AND expires_at > $2 AND account_login IS NULL)",
         )
         .bind(self.hash.as_slice())
-        .bind((self.clock)())
+        .bind(now)
         .fetch_one(&self.pool)
-        .await
+        .await?;
+        Ok(valid.then_some(SessionIdentity::SharedKey))
     }
 }
 
-fn token_hash(key: &CoordinatorAccessKey, token: &[u8; 32]) -> [u8; 32] {
-    // Fixed-size hashes and random tokens. Rotating the configured key also invalidates issued cookies.
-    Sha256::new()
-        .chain_update(b"underctrl:coordinator-session:v1\0")
-        .chain_update(Sha256::digest(key.as_bytes()))
-        .chain_update(token)
-        .finalize()
-        .into()
-}
-
-fn session(headers: &HeaderMap, state: &AppState, key: &CoordinatorAccessKey) -> Option<ActiveSession> {
+fn session(headers: &HeaderMap, state: &AppState, mode: AuthMode<'_>) -> Option<ActiveSession> {
     let value = headers
         .get_all(header::COOKIE)
         .iter()
@@ -68,7 +146,8 @@ fn session(headers: &HeaderMap, state: &AppState, key: &CoordinatorAccessKey) ->
     Some(ActiveSession {
         pool: state.pool.clone(),
         clock: state.clock.clone(),
-        hash: token_hash(key, &token),
+        hash: mode.token_hash(&token)?,
+        accounts: matches!(mode, AuthMode::Accounts),
     })
 }
 
@@ -145,15 +224,19 @@ pub(crate) async fn auth_headers(request: Request, next: Next) -> Response {
 }
 
 pub(crate) async fn protect(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    let Some(key) = &state.settings.coordinator_access_key else {
+    let mode = AuthMode::from_settings(&state.settings);
+    if !mode.required() {
         return next.run(request).await;
-    };
+    }
     let response = async {
         check_origin(request.method(), request.headers(), &state.settings)?;
-        let access = session(request.headers(), &state, key)
+        let access = session(request.headers(), &state, mode)
             .ok_or_else(|| unauthorized("Войдите как координатор."))?;
-        if !access.is_valid().await? {
+        let Some(identity) = access.identity().await? else {
             return Err(unauthorized("Сеанс координатора завершён. Войдите снова."));
+        };
+        if let SessionIdentity::Account(coordinator) = identity {
+            request.extensions_mut().insert(coordinator);
         }
         request.extensions_mut().insert(access);
         Ok(next.run(request).await)
@@ -163,10 +246,15 @@ pub(crate) async fn protect(State(state): State<AppState>, mut request: Request,
     no_store(response)
 }
 
-fn status(required: bool, authenticated: bool) -> Response {
+fn status(mode: AuthMode<'_>, identity: Option<SessionIdentity>) -> Response {
     Json(SessionStatus {
-        required,
-        authenticated,
+        required: mode.required(),
+        authenticated: identity.is_some(),
+        mode: mode.label(),
+        coordinator: match identity {
+            Some(SessionIdentity::Account(coordinator)) => Some(coordinator),
+            _ => None,
+        },
     })
     .into_response()
 }
@@ -180,14 +268,12 @@ fn session_cookie(value: &str, max_age: Option<i64>) -> Result<HeaderValue, AppE
 }
 
 pub(crate) async fn get(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Response> {
-    let Some(key) = &state.settings.coordinator_access_key else {
-        return Ok(status(false, false));
+    let mode = AuthMode::from_settings(&state.settings);
+    let identity = match session(&headers, &state, mode) {
+        Some(access) => access.identity().await?,
+        None => None,
     };
-    let authenticated = match session(&headers, &state, key) {
-        Some(access) => access.is_valid().await?,
-        None => false,
-    };
-    Ok(status(true, authenticated))
+    Ok(status(mode, identity))
 }
 
 pub(crate) async fn login(
@@ -195,54 +281,91 @@ pub(crate) async fn login(
     headers: HeaderMap,
     body: Result<Json<Login>, JsonRejection>,
 ) -> ApiResult<Response> {
-    let Some(key) = &state.settings.coordinator_access_key else {
-        return Ok(status(false, false));
-    };
-    check_origin(&Method::POST, &headers, &state.settings)?;
-    let Json(input) = body.map_err(|_| AppError::bad_request("Ожидаются key и remember в JSON."))?;
-    if !bool::from(Sha256::digest(input.key.as_bytes()).ct_eq(&Sha256::digest(key.as_bytes()))) {
-        return Err(unauthorized("Ключ координатора не подошёл."));
+    let mode = AuthMode::from_settings(&state.settings);
+    if !mode.required() {
+        return Ok(status(mode, None));
     }
+    check_origin(&Method::POST, &headers, &state.settings)?;
+    let Json(input) =
+        body.map_err(|_| AppError::bad_request("Укажите ключ или логин и пароль вместе с remember."))?;
+    let invalid = || unauthorized("Неверные данные для входа.");
+    let (login, remember) = match (mode, input) {
+        (AuthMode::Accounts, Login::Key(input)) => {
+            let login = coordinator_accounts::authenticate_key(&state.pool, input.key)
+                .await?
+                .ok_or_else(invalid)?;
+            (Some(login), input.remember)
+        }
+        (AuthMode::Accounts, Login::Password(input)) => {
+            let login = coordinator_accounts::authenticate_password(&state.pool, input.login, input.password)
+                .await?
+                .ok_or_else(invalid)?;
+            (Some(login), input.remember)
+        }
+        (AuthMode::SharedKey(key), Login::Key(input))
+            if bool::from(Sha256::digest(input.key.as_bytes()).ct_eq(&Sha256::digest(key.as_bytes()))) =>
+        {
+            (None, input.remember)
+        }
+        _ => return Err(invalid()),
+    };
 
     let mut token = [0; 32];
     getrandom::fill(&mut token).map_err(|_| AppError::internal())?;
     let now = (state.clock)();
-    let ttl = if input.remember {
+    let ttl = if remember {
         REMEMBER_SECONDS
     } else {
         SESSION_SECONDS
     };
     let expires = now + chrono::TimeDelta::seconds(ttl);
     let mut tx = state.pool.begin().await?;
+    let identity = if let Some(login) = &login {
+        let account = sqlx::query_as::<_, (String, String)>(
+            "SELECT login, display_name FROM coordinator_accounts WHERE login = $1 AND disabled_at IS NULL FOR SHARE",
+        )
+        .bind(login)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(invalid)?;
+        SessionIdentity::Account(account.into())
+    } else {
+        SessionIdentity::SharedKey
+    };
     sqlx::query("DELETE FROM coordinator_sessions WHERE expires_at <= $1")
         .bind(now)
         .execute(&mut *tx)
         .await?;
-    if let Some(previous) = session(&headers, &state, key) {
+    if let Some(previous) = session(&headers, &state, mode) {
         sqlx::query("DELETE FROM coordinator_sessions WHERE token_hash = $1")
             .bind(previous.hash.as_slice())
             .execute(&mut *tx)
             .await?;
     }
-    sqlx::query("INSERT INTO coordinator_sessions (token_hash, expires_at) VALUES ($1, $2)")
-        .bind(token_hash(key, &token).as_slice())
-        .bind(expires)
-        .execute(&mut *tx)
-        .await?;
+    let hash = mode.token_hash(&token).ok_or_else(AppError::internal)?;
+    sqlx::query(
+        "INSERT INTO coordinator_sessions (token_hash, expires_at, account_login) VALUES ($1, $2, $3)",
+    )
+    .bind(hash.as_slice())
+    .bind(expires)
+    .bind(login)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
 
-    let mut result = status(true, true);
+    let mut result = status(mode, Some(identity));
     result.headers_mut().insert(
         header::SET_COOKIE,
-        session_cookie(&hex::encode(token), input.remember.then_some(REMEMBER_SECONDS))?,
+        session_cookie(&hex::encode(token), remember.then_some(REMEMBER_SECONDS))?,
     );
     Ok(result)
 }
 
 pub(crate) async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Response> {
-    if let Some(key) = &state.settings.coordinator_access_key {
+    let mode = AuthMode::from_settings(&state.settings);
+    if mode.required() {
         check_origin(&Method::DELETE, &headers, &state.settings)?;
-        if let Some(access) = session(&headers, &state, key) {
+        if let Some(access) = session(&headers, &state, mode) {
             sqlx::query("DELETE FROM coordinator_sessions WHERE token_hash = $1")
                 .bind(access.hash.as_slice())
                 .execute(&state.pool)

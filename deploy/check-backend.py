@@ -24,27 +24,30 @@ def request(path, *, method="GET", headers=None, data=None):
     return opener.open(Request(BASE + path, data, headers or {}, method=method), timeout=5)
 
 
-def session_required():
+def session_status():
     try:
         with request(SESSION) as response:
-            required = json.load(response)["required"]
+            status = json.load(response)
+            required = status["required"]
             if not isinstance(required, bool):
                 raise ValueError("Invalid session status")
-            return required
+            return required, status.get("mode")
     except HTTPError as error:
         if error.code != 404:
             raise
         error.close()
-        return False  # The previous image may predate coordinator authentication.
+        return False, None  # The previous image may predate coordinator authentication.
 
 
-def coordinator_key(container):
+def coordinator_config(container):
     config = subprocess.check_output(
         ["docker", "container", "inspect", "--format", "{{json .Config.Env}}", container],
         stderr=subprocess.DEVNULL,
+        timeout=10,
     )
     env = dict(entry.split("=", 1) for entry in json.loads(config))
-    return env.get("COORDINATOR_ACCESS_KEY")
+    accounts = env.get("COORDINATOR_ACCOUNTS_ENABLED", "").strip().lower()
+    return accounts in ("1", "true", "t", "yes", "y", "on"), env.get("COORDINATOR_ACCESS_KEY")
 
 
 def anonymous_access_denied():
@@ -65,11 +68,24 @@ def session_cookie(key):
         return {"Cookie": f"{COOKIE}={cookie[COOKIE].value}"}
 
 
+def accounts_ready(container):
+    return subprocess.run(
+        ["docker", "exec", container, "/usr/local/bin/api", "coordinator", "check"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=15,
+    ).returncode == 0
+
+
 def check(container):
     with request("/health/ready"):
         pass
-    key = coordinator_key(container)
-    if session_required() != (key is not None):
+    accounts, key = coordinator_config(container)
+    required, mode = session_status()
+    if accounts:
+        return required and mode == "accounts" and anonymous_access_denied() and accounts_ready(container)
+    expected_mode = "shared-key" if key is not None else "none"
+    if required != (key is not None) or mode not in (None, expected_mode):
         return False
     if key is not None and not anonymous_access_denied():
         return False
@@ -87,5 +103,5 @@ def check(container):
 if __name__ == "__main__":
     try:
         sys.exit(0 if check(sys.argv[1]) else 1)
-    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         sys.exit(1)

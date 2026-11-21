@@ -112,12 +112,18 @@ API слушает порт `8080` внутри контейнера и дост
 `Exited (0)` для миграции и `healthy` для API после запуска. Готовность
 проверяется ответом `"database":true` на `/health/ready`.
 
-### Вход координатора на vserver
+### Личные учётки координаторов на vserver
 
-1. Выложите backend, пока `COORDINATOR_ACCESS_KEY` отсутствует в `.env`, затем выложите frontend с экраном входа. До включения ключа `GET /api/v1/auth/coordinator/session` возвращает `required: false`.
-2. Установите из слитого коммита обновлённый скрипт и проверку готовности автодеплоя по инструкции в следующем разделе. После включения входа служба создаёт для проверки отдельную сессию и сразу отзывает её.
-3. На vserver выполните `openssl rand -hex 32`. Откройте `sudoedit /home/cyber/cybergarden/backend/.env` и добавьте или замените `COORDINATOR_ACCESS_KEY`, присвоив ему полученное значение. В `CORS_ORIGINS` укажите `https://cybergarden.sosmooth.ru`, сохранив остальные нужные адреса. Ключ вводится в поле «Ключ координатора» на сайте.
-4. Пересоздайте `api`, чтобы Docker применил изменения `.env`. Для установленного автодеплоя используйте блок ниже. Для ручного запуска используйте `dc up -d --no-build --no-deps --force-recreate api` из предыдущего раздела.
+1. Выложите backend с `COORDINATOR_ACCOUNTS_ENABLED=false`, затем frontend с выбором способа входа. Установите обновлённую службу автодеплоя из слитого коммита по инструкции в следующем разделе. С установкой станет доступен скрипт подготовки учёток.
+2. После применения миграции `0006` запустите на vserver команду под своей учётной записью администратора. Скрипт сам использует `sudo` для Docker.
+
+   ```bash
+   /usr/local/sbin/underctrl-create-test-coordinators
+   ```
+
+   Скрипт создаёт `test-coordinator-1`, `test-coordinator-2` и `test-coordinator-3` и печатает путь к JSON с логинами, паролями и отдельными ключами. По умолчанию файл появляется в `$HOME/.local/state/underctrl/test-coordinators.json` с правами `0600`. Можно передать другой путь первым аргументом. Скрипт сохраняет существующие учётки и файлы с ранее выданными данными.
+3. Откройте `sudoedit /home/cyber/cybergarden/backend/.env`. Установите `COORDINATOR_ACCOUNTS_ENABLED=true`. В `CORS_ORIGINS` добавьте `https://cybergarden.sosmooth.ru`, сохранив остальные нужные адреса. Режим личных учёток проверяет личные пароли и ключи.
+4. Пересоздайте `api`, чтобы Docker применил `.env`. Для установленного автодеплоя используйте блок ниже. При ручном управлении используйте функцию `dc` из предыдущего раздела и команду `dc up -d --no-build --no-deps --force-recreate api`.
 
 ```bash
 sudo flock -n /run/lock/underctrl-backend-deploy.lock bash -euo pipefail <<'RECREATE_API'
@@ -141,7 +147,9 @@ curl -fsS https://cybergarden.sosmooth.ru/api/v1/auth/coordinator/session
 curl -sS -o /dev/null -w '%{http_code}\n' 'https://cybergarden.sosmooth.ru/api/v1/snapshot?view=web'
 ```
 
-Первый запрос должен вернуть `required: true`, второй — `401`. Фронтенд использует существующий прокси `/api/v1`. Cookie привязана к HTTPS-хосту, через который координатор выполнил вход. После смены ключа и пересоздания `api` ранее выданные сессии становятся недействительными.
+Первый запрос должен вернуть `required: true` и `mode: "accounts"`, второй — `401`. На сайте выберите «Логин и пароль» или вход по личному ключу и используйте данные одной из тестовых учёток. Фронтенд использует существующий прокси `/api/v1`. Cookie привязана к HTTPS-хосту, через который координатор выполнил вход.
+
+Для новой рабочей учётки оператор может запустить команду `api coordinator create LOGIN [DISPLAY_NAME]` внутри контейнера `api` через `sudo docker exec`. Сохраните стандартный вывод в новый файл с `umask 077` и включённым `set -o noclobber`. Для отключения учётки и отзыва её сессий используйте `api coordinator disable LOGIN` через тот же контейнер.
 
 ## Автодеплой из main на vserver
 
@@ -182,7 +190,7 @@ GitHub Actions проверяет PR в `main` и push в `main`. На серв�
 sudo journalctl -u underctrl-backend-deploy.service -n 80 --no-pager
 ```
 
-При изменении самой конфигурации Compose повторите установку файлов
+При изменении конфигурации Compose или скриптов автодеплоя повторите установку файлов
 из проверенного коммита `main`. Автоматический цикл использует параметры
 Compose, установленные владельцем сервера в `/etc/underctrl-backend-deploy`.
 

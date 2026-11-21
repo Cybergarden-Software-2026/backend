@@ -1,6 +1,7 @@
 //! Уведомления координатора — порт `app/api/v1/notifications.py`,
 //! `app/services/notification_service.py` и `app/core/security.py` (пользователь из `X-User-Id`).
 
+use axum::Extension;
 use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, StatusCode};
 use dashboard_domain::cursors::parse_cursor;
@@ -10,6 +11,7 @@ use dashboard_store::read_repo;
 use serde_json::{Value, json};
 
 use crate::AppState;
+use crate::coordinator_accounts::Coordinator;
 use crate::dashboard::invalid_cursor;
 use crate::error::{ApiResult, AppError};
 use crate::params::{self, Params};
@@ -43,12 +45,13 @@ pub fn current_user(state: &AppState, headers: &HeaderMap) -> ApiResult<String> 
     Ok(user.to_owned())
 }
 
-pub async fn list_notifications(
+pub(crate) async fn list_notifications(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
+    coordinator: Option<Extension<Coordinator>>,
     headers: HeaderMap,
 ) -> ApiResult<PyJson> {
-    let user = current_user(&state, &headers)?;
+    let user = notification_user(coordinator, &state, &headers)?;
     let mut p = Params::new(&uri);
     let cursor = p.query_str("cursor", None);
     let limit = p.query_int("limit", 1, 200, DEFAULT_LIMIT);
@@ -77,12 +80,13 @@ pub async fn list_notifications(
 ///
 /// Отличие от Python, оставленное намеренно: id вне `bigint` Python передаёт в asyncpg и
 /// отвечает 500; здесь такого уведомления просто нет — 404.
-pub async fn mark_read(
+pub(crate) async fn mark_read(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
+    coordinator: Option<Extension<Coordinator>>,
     headers: HeaderMap,
 ) -> ApiResult<StatusCode> {
-    let user = current_user(&state, &headers)?;
+    let user = notification_user(coordinator, &state, &headers)?;
     let mut p = Params::new(&uri);
     let segment = uri.path().split('/').nth(4).unwrap_or("");
     let id = p.path_int("notification_id", &params::decode_path_segment(segment), 1);
@@ -97,6 +101,18 @@ pub async fn mark_read(
     read_repo::mark_read(&mut tx, id, &user, (state.clock)()).await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn notification_user(
+    coordinator: Option<Extension<Coordinator>>,
+    state: &AppState,
+    headers: &HeaderMap,
+) -> ApiResult<String> {
+    match coordinator {
+        // Keep account state separate from identifiers supplied to legacy routes via X-User-Id.
+        Some(Extension(coordinator)) => Ok(format!("account:{}", coordinator.login)),
+        None => current_user(state, headers),
+    }
 }
 
 #[cfg(test)]
