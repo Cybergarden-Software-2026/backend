@@ -162,39 +162,37 @@ async fn app_error_body_has_details() {
     );
 }
 
-fn json_request(method: &str, uri: &str, body: &Value, auth: Option<&str>) -> Request<Body> {
-    let mut req = Request::builder()
+fn json_request(method: &str, uri: &str, body: &Value) -> Request<Body> {
+    Request::builder()
         .method(method)
         .uri(uri)
-        .header("Content-Type", "application/json");
-    if let Some(value) = auth {
-        req = req.header("Authorization", value);
-    }
-    req.body(Body::from(body.to_string())).unwrap()
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
 }
 
 #[tokio::test]
 async fn demo_routes_are_hidden_unless_enabled() {
-    let req = json_request("POST", "/api/v1/demo", &json!({"action":"mass"}), None);
+    let req = json_request("POST", "/api/v1/demo", &json!({"action":"mass"}));
     let (status, _, body) = call(app(&[]), req).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "NOT_FOUND");
-    let req = json_request("PUT", "/api/v1/incidents", &json!([]), None);
+    let req = json_request("PUT", "/api/v1/incidents", &json!([]));
     let (status, _, body) = call(app(&[]), req).await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(body["code"], "METHOD_NOT_ALLOWED");
 }
 
 #[tokio::test]
-async fn demo_routes_require_the_coordinator_key_when_configured() {
-    let vars = [("DEMO_API_ENABLED", "true"), ("ASSIGNMENT_TOKEN", "local-test")];
-    for req in [
-        json_request("POST", "/api/v1/demo", &json!({"action":"mass"}), None),
-        json_request("PUT", "/api/v1/incidents", &json!([]), Some("Bearer wrong")),
+async fn shift_statistics_rejects_invalid_ranges_without_querying_the_database() {
+    for uri in [
+        "/api/v1/statistics/shift",
+        "/api/v1/statistics/shift?from=2026-11-20T12:00:00&to=2026-11-20T12:01:00Z",
+        "/api/v1/statistics/shift?from=2026-11-20T12:01:00Z&to=2026-11-20T12:00:00Z",
     ] {
-        let (status, _, body) = call(app(&vars), req).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(body["code"], "DEMO_UNAUTHORIZED");
+        let (status, _, body) = call(app(&[]), get(uri)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(body["code"], "VALIDATION_ERROR");
     }
 }
 

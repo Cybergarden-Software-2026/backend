@@ -5,9 +5,7 @@
 //! веб-снимок. Импортёр видит тот же файл и повторно его не меняет.
 //!
 //! Маршруты выключены по умолчанию (`DEMO_API_ENABLED=false`): тогда `POST /demo` отвечает 404,
-//! а `PUT /incidents` — 405, как без маршрута. Если задан `ASSIGNMENT_TOKEN`, изменения требуют
-//! того же ключа координатора в `Authorization: Bearer <token>`. Каталог источника должен быть
-//! доступен API на запись.
+//! а `PUT /incidents` — 405. Каталог тестового источника должен быть доступен API на запись.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -15,7 +13,7 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use axum::extract::rejection::{BytesRejection, JsonRejection};
 use axum::extract::{Json, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use dashboard_domain::constants::{NormalizedState, PRIORITY_CRITICAL};
 use dashboard_domain::normalizer::resolve_state;
@@ -25,7 +23,6 @@ use dashboard_importer::reader::{self, ReadOptions};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::assignments::bearer_matches;
 use crate::dashboard::build_snapshot_with_view;
 use crate::response::PyJson;
 use crate::{ApiResult, AppError, AppState};
@@ -53,13 +50,11 @@ pub struct DemoRequest {
 /// `POST /demo` `{"action": "..."}`: меняет тестовую выгрузку по сценарию.
 pub async fn simulate(
     State(state): State<AppState>,
-    headers: HeaderMap,
     body: Result<Json<DemoRequest>, JsonRejection>,
 ) -> ApiResult<PyJson> {
     if !state.settings.demo_api_enabled {
         return Err(AppError::http(StatusCode::NOT_FOUND));
     }
-    authorize(&state, &headers)?;
     let Json(input) = body.map_err(|_| AppError::bad_request("Ожидается action в JSON."))?;
     if input.action == "reset" {
         let seed = state.settings.demo_seed_path.clone().ok_or_else(|| {
@@ -84,7 +79,12 @@ pub async fn simulate(
     let mut items: Vec<Value> = serde_json::from_slice(&content)
         .map_err(|_| AppError::conflict("Источник должен содержать JSON-массив инцидентов."))?;
     let now = (state.clock)();
-    apply_action(&mut items, &input.action, now, &state.settings.coordinator_group_name)?;
+    apply_action(
+        &mut items,
+        &input.action,
+        now,
+        &state.settings.coordinator_group_name,
+    )?;
     let mut content = serde_json::to_vec_pretty(&items).map_err(|_| AppError::internal())?;
     content.push(b'\n');
     replace_source(&state, content).await
@@ -93,13 +93,11 @@ pub async fn simulate(
 /// `PUT /incidents`: полная замена тестовой выгрузки массивом из тела запроса.
 pub async fn replace_incidents(
     State(state): State<AppState>,
-    headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> ApiResult<PyJson> {
     if !state.settings.demo_api_enabled {
         return Err(AppError::http(StatusCode::METHOD_NOT_ALLOWED));
     }
-    authorize(&state, &headers)?;
     let body = body.map_err(|_| {
         AppError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -108,17 +106,6 @@ pub async fn replace_incidents(
         )
     })?;
     replace_source(&state, body.to_vec()).await
-}
-
-fn authorize(state: &AppState, headers: &HeaderMap) -> ApiResult<()> {
-    match state.settings.assignment_token.as_deref() {
-        Some(expected) if !bearer_matches(headers, expected) => Err(AppError::new(
-            StatusCode::UNAUTHORIZED,
-            "DEMO_UNAUTHORIZED",
-            "Введите ключ координатора для изменения тестовых данных.",
-        )),
-        _ => Ok(()),
-    }
 }
 
 async fn read_file(path: std::path::PathBuf) -> std::io::Result<Vec<u8>> {
@@ -302,7 +289,9 @@ pub fn apply_action(
 
     match action {
         "critical" => {
-            let i = pick(find(items.as_slice(), |i| active(i) && priority_of(i) != Some(PRIORITY_CRITICAL)));
+            let i = pick(find(items.as_slice(), |i| {
+                active(i) && priority_of(i) != Some(PRIORITY_CRITICAL)
+            }));
             set(
                 &mut items[i],
                 json!({
@@ -317,14 +306,18 @@ pub fn apply_action(
             );
         }
         "assign" => {
-            let i = pick(find(items.as_slice(), |i| group_of(i) != coordinator && attention(i)));
+            let i = pick(find(items.as_slice(), |i| {
+                group_of(i) != coordinator && attention(i)
+            }));
             set(
                 &mut items[i],
                 json!({"assignedGroupName": coordinator, "lastAssignmentToTeamDateTime": iso(now)}),
             );
         }
         "resolve" => {
-            let i = pick(find(items.as_slice(), |i| priority_of(i) == Some(PRIORITY_CRITICAL) && active(i)));
+            let i = pick(find(items.as_slice(), |i| {
+                priority_of(i) == Some(PRIORITY_CRITICAL) && active(i)
+            }));
             set(
                 &mut items[i],
                 json!({
@@ -337,7 +330,9 @@ pub fn apply_action(
             );
         }
         "close" => {
-            let i = pick(find(items.as_slice(), |i| state_of(i) == NormalizedState::Resolved));
+            let i = pick(find(items.as_slice(), |i| {
+                state_of(i) == NormalizedState::Resolved
+            }));
             let completion = items[i]
                 .get("completionDate")
                 .filter(|v| !v.is_null())
@@ -375,7 +370,9 @@ pub fn apply_action(
             }),
         ),
         "coordinator-wait" => {
-            let i = pick(find(items.as_slice(), |i| attention(i) && priority_of(i) != Some(PRIORITY_CRITICAL)));
+            let i = pick(find(items.as_slice(), |i| {
+                attention(i) && priority_of(i) != Some(PRIORITY_CRITICAL)
+            }));
             set(
                 &mut items[i],
                 json!({
@@ -428,7 +425,10 @@ mod tests {
         apply_action(&mut items, "mass", now(), COORD).unwrap();
         assert_eq!(items.len(), 6);
         assert!(items[3..].iter().all(|i| i["serviceId"] == "demo-payments"));
-        assert_eq!(items[5]["id"], format!("DEMO-MASS-{}-3", now().timestamp_millis()));
+        assert_eq!(
+            items[5]["id"],
+            format!("DEMO-MASS-{}-3", now().timestamp_millis())
+        );
         assert_eq!(items[3]["deadline"], "2026-11-21T12:20:00Z");
     }
 

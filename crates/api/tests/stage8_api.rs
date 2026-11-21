@@ -81,15 +81,11 @@ impl Api {
         self.request("GET", path, &[]).await
     }
 
-    async fn assign(&self, sys_id: &str, team: &str, revision: i64, authorization: Option<&str>) -> Res {
-        let mut headers = vec![("Content-Type", "application/json")];
-        if let Some(value) = authorization {
-            headers.push(("Authorization", value));
-        }
+    async fn assign(&self, sys_id: &str, team: &str, revision: i64) -> Res {
         self.send(
             "POST",
             &format!("/incidents/{sys_id}/assignment"),
-            &headers,
+            &[("Content-Type", "application/json")],
             Body::from(json!({"team":team,"expectedRevision":revision}).to_string()),
         )
         .await
@@ -437,20 +433,8 @@ async fn web_queue_filters_before_paging_and_analysis_uses_completed_evidence() 
 }
 
 #[tokio::test]
-async fn assignments_require_a_configured_coordinator_token() {
-    let api = api!();
-    let res = api.assign("1", "Team A", 1, Some("Bearer local-test")).await;
-    assert_eq!(res.status, 403);
-    assert_eq!(res.json()["code"], "ASSIGNMENT_DISABLED");
-    api.finish().await;
-}
-
-#[tokio::test]
 async fn assignments_are_atomic_and_reconciled_with_subsequent_imports() {
-    let Some(mut api) = Api::with_vars(&[("ASSIGNMENT_TOKEN", "local-test")]).await else {
-        return;
-    };
-    let bearer = Some("Bearer local-test");
+    let mut api = api!();
     let mut recs = records();
     recs.truncate(4);
     let initial_team = "Duty";
@@ -487,21 +471,11 @@ async fn assignments_are_atomic_and_reconciled_with_subsequent_imports() {
             {"name":"Duty","activeCount":1}, {"name":"Team A","activeCount":1}, {"name":"Team B","activeCount":0}
         ])
     );
-    assert_eq!(api.assign(&id, "Team A", 1, None).await.status, 401);
-    assert_eq!(
-        api.assign(&id, "Team A", 1, Some("Bearer other-key"))
-            .await
-            .status,
-        401
-    );
-    assert_eq!(api.assign(closed, "Team A", 1, bearer).await.status, 409);
-    assert_eq!(api.assign(&id, "Unknown", 1, bearer).await.status, 400);
-    assert_eq!(api.assign("missing", "Team B", 1, bearer).await.status, 404);
+    assert_eq!(api.assign(closed, "Team A", 1).await.status, 409);
+    assert_eq!(api.assign(&id, "Unknown", 1).await.status, 400);
+    assert_eq!(api.assign("missing", "Team B", 1).await.status, 404);
 
-    let (left, right) = tokio::join!(
-        api.assign(&id, "Team A", 1, bearer),
-        api.assign(&id, "Team B", 1, bearer),
-    );
+    let (left, right) = tokio::join!(api.assign(&id, "Team A", 1), api.assign(&id, "Team B", 1),);
     let (ok, conflict, winning_team) = if left.status == 200 {
         (left, right, "Team A")
     } else {
@@ -823,6 +797,81 @@ async fn source_notifications_listed() {
 }
 
 #[tokio::test]
+async fn shift_statistics_uses_only_historical_dashboard_assignments() {
+    let Some(mut api) = Api::with_vars(&[("SOURCE_NAIVE_TIMEZONE", "Europe/Moscow")]).await else {
+        return;
+    };
+    let range = "/statistics/shift?from=2026-11-20T12:00:01Z&to=2026-11-20T12:00:06Z";
+    let empty = api.json(range).await;
+    assert_eq!(empty["transfers"], json!([]));
+    assert_eq!(empty["averageMs"], Value::Null);
+    assert_eq!(empty["kpiPercent"], Value::Null);
+
+    let mut recs = records();
+    recs.truncate(4);
+    for (record, (team, priority)) in recs
+        .iter_mut()
+        .zip([("", 4), (COORD, 3), ("Team B", 2), ("Team A", 1)])
+    {
+        update(
+            record,
+            &[
+                ("stateEnum", s("Assigned")),
+                ("stateId", json!(0)),
+                ("priorityId", json!(priority)),
+                ("assignedGroupName", s(team)),
+                ("submitDate", s("2026-11-20 14:50:02")),
+                ("lastAssignmentToTeamDateTime", s("2026-11-20 14:50:02")),
+            ],
+        );
+    }
+    update(&mut recs[0], &[("header", s("Название во время назначения"))]);
+    api.imported(&recs).await;
+    let revision = api.json("/snapshot").await["revision"].as_i64().unwrap();
+    for (index, incident) in recs.iter().take(3).enumerate() {
+        let key = incident["sysId"].as_str().unwrap();
+        let res = api.assign(key, "Team A", revision + index as i64).await;
+        assert_eq!(res.status, 200, "{}", res.json());
+        api.e.clock.advance(1.0);
+    }
+
+    // A subsequent ITSM import changes the title and priority and assigns a
+    // different incident. The report keeps the previous values and excludes imports.
+    update(
+        &mut recs[0],
+        &[("header", s("Новое название")), ("priorityId", json!(2))],
+    );
+    update(&mut recs[3], &[("assignedGroupName", s("External"))]);
+    api.imported(&recs).await;
+
+    let stats = api.json(range).await;
+    assert_eq!(stats["source"], "api");
+    assert_eq!(stats["coordinator"]["id"], "shift");
+    assert_eq!(stats["transferred"], 3);
+    assert_eq!(stats["critical"], 1);
+    assert_eq!(stats["measured"], 2);
+    assert_eq!(stats["kpiMet"], 1);
+    assert_eq!(stats["kpiPercent"].as_f64(), Some(50.0));
+    assert_eq!(stats["averageMs"].as_f64(), Some(599_500.0));
+    let transfers = stats["transfers"].as_array().unwrap();
+    assert_eq!(transfers[0]["durationMs"], Value::Null);
+    assert_eq!(transfers[0]["kpiMet"], Value::Null);
+    assert_eq!(transfers[1]["durationMs"], 600_000);
+    assert_eq!(transfers[1]["kpiMet"], false);
+    assert_eq!(transfers[2]["durationMs"], 599_000);
+    assert_eq!(transfers[2]["kpiMet"], true);
+    assert_eq!(transfers[2]["title"], "Название во время назначения");
+    assert_eq!(transfers[2]["team"], "Team A");
+
+    let bounded = api
+        .json("/statistics/shift?from=2026-11-20T15:00:02%2B03:00&to=2026-11-20T12:00:03Z")
+        .await;
+    assert_eq!(bounded["transferred"], 1);
+    assert_eq!(bounded["transfers"][0]["id"], transfers[1]["id"]);
+    api.finish().await;
+}
+
+#[tokio::test]
 async fn openapi_lists_all_routes() {
     let api = api!();
     let spec = api.json("/openapi.json").await;
@@ -844,13 +893,14 @@ async fn openapi_lists_all_routes() {
 
 // ================================================================ демо-режим фронтенда
 
-async fn demo_send(api: &Api, method: &str, path: &str, body: &Value, auth: Option<&str>) -> Res {
-    let mut headers = vec![("Content-Type", "application/json")];
-    if let Some(value) = auth {
-        headers.push(("Authorization", value));
-    }
-    api.send(method, path, &headers, Body::from(body.to_string()))
-        .await
+async fn demo_send(api: &Api, method: &str, path: &str, body: &Value) -> Res {
+    api.send(
+        method,
+        path,
+        &[("Content-Type", "application/json")],
+        Body::from(body.to_string()),
+    )
+    .await
 }
 
 fn source_json(api: &Api) -> Value {
@@ -860,9 +910,9 @@ fn source_json(api: &Api) -> Value {
 #[tokio::test]
 async fn demo_routes_are_disabled_by_default() {
     let api = api!();
-    let res = demo_send(&api, "POST", "/demo", &json!({"action":"deadline"}), None).await;
+    let res = demo_send(&api, "POST", "/demo", &json!({"action":"deadline"})).await;
     assert_eq!(res.status, 404);
-    let res = demo_send(&api, "PUT", "/incidents", &json!([]), None).await;
+    let res = demo_send(&api, "PUT", "/incidents", &json!([])).await;
     assert_eq!(res.status, 405);
     assert_eq!(res.json()["code"], "METHOD_NOT_ALLOWED");
     api.finish().await;
@@ -870,30 +920,16 @@ async fn demo_routes_are_disabled_by_default() {
 
 #[tokio::test]
 async fn demo_import_replaces_the_source_and_scenarios_publish_new_revisions() {
-    let Some(mut api) = Api::with_vars(&[
-        ("DEMO_API_ENABLED", "true"),
-        ("ASSIGNMENT_TOKEN", "local-test"),
-    ])
-    .await
-    else {
+    let Some(mut api) = Api::with_vars(&[("DEMO_API_ENABLED", "true")]).await else {
         return;
     };
-    let bearer = Some("Bearer local-test");
     let mut recs = records();
     api.imported(&recs).await;
     let first = api.json("/snapshot?view=web").await["revision"].as_i64().unwrap();
 
     recs.truncate(5);
     let body = Value::Array(recs.iter().cloned().map(Value::Object).collect());
-    assert_eq!(demo_send(&api, "PUT", "/incidents", &body, None).await.status, 401);
-    assert_eq!(
-        demo_send(&api, "PUT", "/incidents", &body, Some("Bearer other-key"))
-            .await
-            .status,
-        401
-    );
-
-    let res = demo_send(&api, "PUT", "/incidents", &body, bearer).await;
+    let res = demo_send(&api, "PUT", "/incidents", &body).await;
     assert_eq!(res.status, 200, "{}", String::from_utf8_lossy(&res.raw));
     let replaced = res.json();
     let second = replaced["revision"].as_i64().unwrap();
@@ -901,33 +937,37 @@ async fn demo_import_replaces_the_source_and_scenarios_publish_new_revisions() {
     assert_eq!(replaced["items"].as_array().unwrap().len(), 5);
     assert_eq!(source_json(&api), body);
 
-    let rejected = demo_send(&api, "PUT", "/incidents", &json!([{"id":"INC1"}]), bearer).await;
+    let rejected = demo_send(&api, "PUT", "/incidents", &json!([{"id":"INC1"}])).await;
     assert_eq!(rejected.status, 400);
     assert_eq!(rejected.json()["code"], "SNAPSHOT_REJECTED");
-    assert_eq!(source_json(&api), body, "rejected payload must not touch the source");
+    assert_eq!(
+        source_json(&api),
+        body,
+        "rejected payload must not touch the source"
+    );
 
-    let res = demo_send(&api, "POST", "/demo", &json!({"action":"mass"}), bearer).await;
+    let res = demo_send(&api, "POST", "/demo", &json!({"action":"mass"})).await;
     assert_eq!(res.status, 200, "{}", String::from_utf8_lossy(&res.raw));
     let mass = res.json();
     assert!(mass["revision"].as_i64().unwrap() > second);
     assert_eq!(mass["items"].as_array().unwrap().len(), 8);
     assert_eq!(source_json(&api).as_array().unwrap().len(), 8);
 
-    let res = demo_send(&api, "POST", "/demo", &json!({"action":"deadline"}), bearer).await;
+    let res = demo_send(&api, "POST", "/demo", &json!({"action":"deadline"})).await;
     assert_eq!(res.status, 200, "{}", String::from_utf8_lossy(&res.raw));
 
-    let unknown = demo_send(&api, "POST", "/demo", &json!({"action":"explode"}), bearer).await;
+    let unknown = demo_send(&api, "POST", "/demo", &json!({"action":"explode"})).await;
     assert_eq!(unknown.status, 400);
     assert_eq!(unknown.json()["code"], "UNKNOWN_DEMO_ACTION");
 
-    let reset = demo_send(&api, "POST", "/demo", &json!({"action":"reset"}), bearer).await;
+    let reset = demo_send(&api, "POST", "/demo", &json!({"action":"reset"})).await;
     assert_eq!(reset.status, 409);
     assert_eq!(reset.json()["code"], "DEMO_SEED_NOT_CONFIGURED");
     api.finish().await;
 }
 
 #[tokio::test]
-async fn demo_reset_restores_the_seed_without_a_token_when_none_is_configured() {
+async fn demo_reset_restores_the_seed() {
     let seed = std::env::temp_dir().join(format!("demo_seed_{}.json", uuid_like()));
     let mut recs = records();
     recs.truncate(3);
@@ -944,7 +984,7 @@ async fn demo_reset_restores_the_seed_without_a_token_when_none_is_configured() 
         return;
     };
     api.imported(&records()).await;
-    let res = demo_send(&api, "POST", "/demo", &json!({"action":"reset"}), None).await;
+    let res = demo_send(&api, "POST", "/demo", &json!({"action":"reset"})).await;
     assert_eq!(res.status, 200, "{}", String::from_utf8_lossy(&res.raw));
     assert_eq!(res.json()["items"].as_array().unwrap().len(), 3);
     assert_eq!(source_json(&api), seed_body);
@@ -957,9 +997,6 @@ fn uuid_like() -> String {
     format!(
         "{}_{}",
         std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
     )
 }

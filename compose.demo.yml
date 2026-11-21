@@ -1,0 +1,14 @@
+name: mts-incident-dashboard-demo
+
+services:
+  api:
+    environment:
+      DEMO_API_ENABLED: "true"
+      DEMO_SEED_PATH: /data/seed.json
+    ports: !override
+      - "127.0.0.1:18081:8080"
+    volumes: !override
+      - ${UNDERCTRL_DEMO_DATA_DIR:?set an isolated demo export directory}:/data
+  importer:
+    volumes: !override
+      - ${UNDERCTRL_DEMO_DATA_DIR:?set an isolated demo export directory}:/data:ro
