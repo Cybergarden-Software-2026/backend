@@ -856,10 +856,13 @@ async fn shift_statistics_uses_only_historical_dashboard_assignments() {
     let transfers = stats["transfers"].as_array().unwrap();
     assert_eq!(transfers[0]["durationMs"], Value::Null);
     assert_eq!(transfers[0]["kpiMet"], Value::Null);
+    assert_eq!(transfers[0]["reassignmentMs"], 601_000);
     assert_eq!(transfers[1]["durationMs"], 600_000);
     assert_eq!(transfers[1]["kpiMet"], false);
+    assert_eq!(transfers[1]["reassignmentMs"], Value::Null);
     assert_eq!(transfers[2]["durationMs"], 599_000);
     assert_eq!(transfers[2]["kpiMet"], true);
+    assert_eq!(transfers[2]["reassignmentMs"], Value::Null);
     assert_eq!(transfers[2]["title"], "Название во время назначения");
     assert_eq!(transfers[2]["team"], "Team A");
 
