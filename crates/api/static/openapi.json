@@ -1,0 +1,2713 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Dashboard API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Health Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Ready",
+        "operationId": "ready_health_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/snapshot": {
+      "get": {
+        "tags": [
+          "snapshot"
+        ],
+        "summary": "Полный согласованный снимок",
+        "description": "Все присутствующие инциденты в исходном формате МТС + `dashboard`, последние события, состояние источника. До первого принятого снимка — 503.",
+        "operationId": "get_snapshot_api_v1_snapshot_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Первый снимок ещё не принят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/dashboard": {
+      "get": {
+        "tags": [
+          "dashboard"
+        ],
+        "summary": "Снимок `{eventCursor, source, groups, incidents}`",
+        "operationId": "get_dashboard_api_v1_dashboard_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardSnapshot"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Первый снимок ещё не принят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/incidents": {
+      "get": {
+        "tags": [
+          "incidents"
+        ],
+        "summary": "Серверный список с фильтрами",
+        "operationId": "list_incidents_api_v1_incidents_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Поиск по номеру, заголовку, описанию…",
+              "title": "Q"
+            },
+            "description": "Поиск по номеру, заголовку, описанию…"
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/GroupKey"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Group"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/NormalizedState"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "stateEnum",
+              "title": "State"
+            },
+            "description": "stateEnum"
+          },
+          {
+            "name": "priorityId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 4,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Priorityid"
+            }
+          },
+          {
+            "name": "team",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "assignedGroupName",
+              "title": "Team"
+            },
+            "description": "assignedGroupName"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "deadline | -deadline | submitDate | -submitDate | priority | id",
+              "default": "deadline",
+              "title": "Sort"
+            },
+            "description": "deadline | -deadline | submitDate | -submitDate | priority | id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректные параметры",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Первый снимок ещё не принят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Курсор устарел",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/incidents/{key}": {
+      "get": {
+        "tags": [
+          "incidents"
+        ],
+        "summary": "Карточка инцидента",
+        "description": "`{incident, revision, normalizedState}` по API.md + `details` (нормализованные поля, `incidentRevision`, `itsmUrl`) по ARCHITECTURE.md.",
+        "operationId": "get_incident_api_v1_incidents__key__get",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "description": "`sysId` (API.md) или номер `id` вида INC…",
+              "title": "Key"
+            },
+            "description": "`sysId` (API.md) или номер `id` вида INC…"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Первый снимок ещё не принят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/incidents/{key}/events": {
+      "get": {
+        "tags": [
+          "incidents"
+        ],
+        "summary": "История изменений инцидента (новые первыми)",
+        "operationId": "get_incident_events_api_v1_incidents__key__events_get",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "description": "`sysId` (API.md) или номер `id` вида INC…",
+              "title": "Key"
+            },
+            "description": "`sysId` (API.md) или номер `id` вида INC…"
+          },
+          {
+            "name": "beforeId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Beforeid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeEventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректные параметры",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Первый снимок ещё не принят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events/stream": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Поток обновлений (SSE)",
+        "description": "`mode=snapshot` (по умолчанию, API.md): при подключении и при каждой новой ревизии — `event: snapshot` с полным снимком, `id:` = revision.\n\n`mode=notify` (ARCHITECTURE.md): `dashboard.changed` после фиксации изменений, `stream.reset`, если курсор вне журнала. Курсор — `Last-Event-ID`, при первом подключении — `since`.\n\nКаждые `SSE_HEARTBEAT_SECONDS` — комментарий `: heartbeat`.",
+        "operationId": "stream_events_api_v1_events_stream_get",
+        "parameters": [
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "snapshot",
+                "notify"
+              ],
+              "type": "string",
+              "default": "snapshot",
+              "title": "Mode"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "eventCursor из /dashboard",
+              "title": "Since"
+            },
+            "description": "eventCursor из /dashboard"
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Поток Server-Sent Events",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Журнал изменений (новые первыми)",
+        "description": "Курсор следующей страницы передаётся как `beforeId`. `afterId` — нижняя граница.\n\nСовместимость с ARCHITECTURE.md: с `since` или `Accept: text/event-stream` маршрут отдаёт SSE-поток в режиме notify.",
+        "operationId": "list_events_api_v1_events_get",
+        "parameters": [
+          {
+            "name": "afterId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Afterid"
+            }
+          },
+          {
+            "name": "beforeId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Beforeid"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ChangeEventType"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Type"
+            }
+          },
+          {
+            "name": "incidentSysId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Incidentsysid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Поток Server-Sent Events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeEventPage"
+                }
+              },
+              "text/event-stream": {}
+            }
+          },
+          "400": {
+            "description": "Некорректные параметры",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Первый снимок ещё не принят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notifications": {
+      "get": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Уведомления с признаками прочтения (новые первыми)",
+        "operationId": "list_notifications_api_v1_notifications_get",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректные параметры",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notifications/{notification_id}/read": {
+      "put": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Отметить прочитанным (идемпотентно)",
+        "operationId": "mark_read_api_v1_notifications__notification_id__read_put",
+        "parameters": [
+          {
+            "name": "notification_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "title": "Notification Id"
+            }
+          },
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Уведомление не найдено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ChangeEventPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeEventView"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nextcursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ChangeEventPage",
+        "description": "Ответ `GET /events` и `GET /incidents/{sysId}/events`."
+      },
+      "ChangeEventType": {
+        "type": "string",
+        "enum": [
+          "created",
+          "critical",
+          "assigned",
+          "resolved",
+          "closed",
+          "reopened",
+          "research",
+          "deadline",
+          "team",
+          "priority",
+          "changed",
+          "removed"
+        ],
+        "title": "ChangeEventType",
+        "description": "Типы `ChangeEvent` из API.md §5. Одно событие может иметь несколько типов."
+      },
+      "ChangeEventView": {
+        "properties": {
+          "eventId": {
+            "type": "integer",
+            "title": "Eventid"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision",
+            "description": "Ревизия снимка, в которой событие зафиксировано"
+          },
+          "sysId": {
+            "type": "string",
+            "title": "Sysid"
+          },
+          "incidentId": {
+            "type": "string",
+            "title": "Incidentid"
+          },
+          "header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header"
+          },
+          "types": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeEventType"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Types"
+          },
+          "fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Fields",
+            "description": "Имена изменённых полей выгрузки"
+          },
+          "at": {
+            "type": "string",
+            "title": "At"
+          },
+          "previous": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous",
+            "description": "Предыдущая исходная запись; null у новой"
+          },
+          "current": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current",
+            "description": "Текущая исходная запись; null при удалении"
+          },
+          "incidentRevision": {
+            "type": "integer",
+            "title": "Incidentrevision"
+          }
+        },
+        "type": "object",
+        "required": [
+          "eventId",
+          "revision",
+          "sysId",
+          "incidentId",
+          "header",
+          "types",
+          "fields",
+          "at",
+          "previous",
+          "current",
+          "incidentRevision"
+        ],
+        "title": "ChangeEventView",
+        "description": "Одно изменение инцидента. Идентификатор стабилен, типов может быть несколько."
+      },
+      "DashboardIncident": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "sysId": {
+            "type": "string",
+            "title": "Sysid"
+          },
+          "incidentRevision": {
+            "type": "integer",
+            "title": "Incidentrevision"
+          },
+          "header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header"
+          },
+          "shortDescription": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shortdescription"
+          },
+          "productName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Productname"
+          },
+          "service": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "assigned | in_progress | resolved | closed | research | unknown"
+          },
+          "stateEnum": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stateenum"
+          },
+          "stateLabel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statelabel"
+          },
+          "priorityId": {
+            "type": "integer",
+            "title": "Priorityid"
+          },
+          "priority": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Priority"
+          },
+          "assignedGroupName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignedgroupname"
+          },
+          "assignedEmployee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignedemployee"
+          },
+          "assignee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignee"
+          },
+          "registeredAt": {
+            "type": "string",
+            "title": "Registeredat"
+          },
+          "deadlineAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadlineat"
+          },
+          "completedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completedat"
+          },
+          "recentlyResolvedUntil": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recentlyresolveduntil"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Resolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sla": {
+            "$ref": "#/components/schemas/SlaInfo"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/GroupKey"
+            },
+            "type": "array",
+            "title": "Groups"
+          },
+          "itsmUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Itsmurl"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "sysId",
+          "incidentRevision",
+          "header",
+          "shortDescription",
+          "productName",
+          "service",
+          "status",
+          "stateEnum",
+          "stateLabel",
+          "priorityId",
+          "priority",
+          "assignedGroupName",
+          "assignedEmployee",
+          "assignee",
+          "registeredAt",
+          "deadlineAt",
+          "completedAt",
+          "recentlyResolvedUntil",
+          "resolution",
+          "sla",
+          "groups",
+          "itsmUrl"
+        ],
+        "title": "DashboardIncident",
+        "description": "Карточка в `/dashboard` (ARCHITECTURE.md): нормализованные имена и типы."
+      },
+      "DashboardMeta": {
+        "properties": {
+          "incidentRevision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Incidentrevision"
+          },
+          "normalizedState": {
+            "$ref": "#/components/schemas/NormalizedState"
+          },
+          "statusRecognized": {
+            "type": "boolean",
+            "title": "Statusrecognized"
+          },
+          "statusMismatch": {
+            "type": "boolean",
+            "title": "Statusmismatch",
+            "description": "stateEnum и stateId противоречат друг другу"
+          },
+          "attention": {
+            "type": "boolean",
+            "title": "Attention",
+            "description": "Assigned, WorkInProgress или Research"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/GroupKey"
+            },
+            "type": "array",
+            "title": "Groups"
+          },
+          "assignee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignee",
+            "description": "assignedEmployee, иначе assignedGroupName"
+          },
+          "sla": {
+            "$ref": "#/components/schemas/SlaInfo"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Resolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "itsmUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Itsmurl"
+          },
+          "firstSeenAt": {
+            "type": "string",
+            "title": "Firstseenat"
+          },
+          "updatedAt": {
+            "type": "string",
+            "title": "Updatedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "incidentRevision",
+          "normalizedState",
+          "statusRecognized",
+          "statusMismatch",
+          "attention",
+          "groups",
+          "assignee",
+          "sla",
+          "firstSeenAt",
+          "updatedAt"
+        ],
+        "title": "DashboardMeta",
+        "description": "Серверные расчёты, добавляемые к исходной записи как поле `dashboard`."
+      },
+      "DashboardSnapshot": {
+        "properties": {
+          "eventCursor": {
+            "type": "string",
+            "title": "Eventcursor"
+          },
+          "serverTime": {
+            "type": "string",
+            "title": "Servertime"
+          },
+          "source": {
+            "$ref": "#/components/schemas/SourceInfo"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/GroupView"
+            },
+            "type": "array",
+            "title": "Groups"
+          },
+          "incidents": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/DashboardIncident"
+            },
+            "type": "object",
+            "title": "Incidents",
+            "description": "Ключ — `id` инцидента"
+          }
+        },
+        "type": "object",
+        "required": [
+          "eventCursor",
+          "serverTime",
+          "source",
+          "groups",
+          "incidents"
+        ],
+        "title": "DashboardSnapshot",
+        "description": "`GET /dashboard` (ARCHITECTURE.md): `{eventCursor, source, groups, incidents}`."
+      },
+      "ErrorResponse": {
+        "properties": {
+          "error": {
+            "type": "string",
+            "title": "Error",
+            "description": "Читаемое сообщение (API.md)"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "description": "Машинный код, UPPER_SNAKE_CASE",
+            "examples": [
+              "INCIDENT_NOT_FOUND"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "То же сообщение (ARCHITECTURE.md)"
+          },
+          "requestId": {
+            "type": "string",
+            "title": "Requestid"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "error",
+          "code",
+          "message",
+          "requestId"
+        ],
+        "title": "ErrorResponse",
+        "description": "Совместимо с API.md (`error`, `code`) и ARCHITECTURE.md (`code`, `message`, `requestId`)."
+      },
+      "GroupKey": {
+        "type": "string",
+        "enum": [
+          "critical",
+          "coordinators",
+          "high",
+          "research"
+        ],
+        "title": "GroupKey"
+      },
+      "GroupView": {
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/GroupKey"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "incidentIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Incidentids",
+            "description": "Номера `id` в порядке отображения"
+          },
+          "sysIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Sysids",
+            "description": "Те же записи по `sysId` (для клиента API.md)"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "title",
+          "incidentIds",
+          "sysIds",
+          "count"
+        ],
+        "title": "GroupView"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "IncidentDetail": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "sysId": {
+            "type": "string",
+            "title": "Sysid"
+          },
+          "incidentRevision": {
+            "type": "integer",
+            "title": "Incidentrevision"
+          },
+          "header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header"
+          },
+          "shortDescription": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shortdescription"
+          },
+          "productName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Productname"
+          },
+          "service": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "assigned | in_progress | resolved | closed | research | unknown"
+          },
+          "stateEnum": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stateenum"
+          },
+          "stateLabel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statelabel"
+          },
+          "priorityId": {
+            "type": "integer",
+            "title": "Priorityid"
+          },
+          "priority": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Priority"
+          },
+          "assignedGroupName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignedgroupname"
+          },
+          "assignedEmployee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignedemployee"
+          },
+          "assignee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignee"
+          },
+          "registeredAt": {
+            "type": "string",
+            "title": "Registeredat"
+          },
+          "deadlineAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadlineat"
+          },
+          "completedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completedat"
+          },
+          "recentlyResolvedUntil": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recentlyresolveduntil"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Resolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sla": {
+            "$ref": "#/components/schemas/SlaInfo"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/GroupKey"
+            },
+            "type": "array",
+            "title": "Groups"
+          },
+          "itsmUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Itsmurl"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "solution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Solution"
+          },
+          "stateId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stateid"
+          },
+          "stateReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statereason"
+          },
+          "stateReasonId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statereasonid"
+          },
+          "normalizedState": {
+            "$ref": "#/components/schemas/NormalizedState"
+          },
+          "statusRecognized": {
+            "type": "boolean",
+            "title": "Statusrecognized"
+          },
+          "statusMismatch": {
+            "type": "boolean",
+            "title": "Statusmismatch"
+          },
+          "urgencyId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Urgencyid"
+          },
+          "urgency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Urgency"
+          },
+          "impactId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Impactid"
+          },
+          "impact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Impact"
+          },
+          "productId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Productid"
+          },
+          "productMasterId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Productmasterid"
+          },
+          "productUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producturl"
+          },
+          "serviceId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Serviceid"
+          },
+          "scenarioName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scenarioname"
+          },
+          "serviceType": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Servicetype"
+          },
+          "serviceTypeId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Servicetypeid"
+          },
+          "incType": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inctype"
+          },
+          "receivingChannel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Receivingchannel"
+          },
+          "assignedEmployeeLogin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignedemployeelogin"
+          },
+          "initiatorName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Initiatorname"
+          },
+          "initiatorLogin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Initiatorlogin"
+          },
+          "lastAssignmentToTeamAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lastassignmenttoteamat"
+          },
+          "waitingExitDate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waitingexitdate"
+          },
+          "isEffect": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iseffect"
+          },
+          "isReason": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isreason"
+          },
+          "isDouble": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isdouble"
+          },
+          "isMaster": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ismaster"
+          },
+          "isRootIncident": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isrootincident"
+          },
+          "isNeedUp": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isneedup"
+          },
+          "eliminationType": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eliminationtype"
+          },
+          "eliminationTypeId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eliminationtypeid"
+          },
+          "isPresent": {
+            "type": "boolean",
+            "title": "Ispresent"
+          },
+          "removedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Removedat"
+          },
+          "firstSeenAt": {
+            "type": "string",
+            "title": "Firstseenat"
+          },
+          "updatedAt": {
+            "type": "string",
+            "title": "Updatedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "sysId",
+          "incidentRevision",
+          "header",
+          "shortDescription",
+          "productName",
+          "service",
+          "status",
+          "stateEnum",
+          "stateLabel",
+          "priorityId",
+          "priority",
+          "assignedGroupName",
+          "assignedEmployee",
+          "assignee",
+          "registeredAt",
+          "deadlineAt",
+          "completedAt",
+          "recentlyResolvedUntil",
+          "resolution",
+          "sla",
+          "groups",
+          "itsmUrl",
+          "description",
+          "solution",
+          "stateId",
+          "stateReason",
+          "stateReasonId",
+          "normalizedState",
+          "statusRecognized",
+          "statusMismatch",
+          "urgencyId",
+          "urgency",
+          "impactId",
+          "impact",
+          "productId",
+          "productMasterId",
+          "productUrl",
+          "serviceId",
+          "scenarioName",
+          "serviceType",
+          "serviceTypeId",
+          "incType",
+          "receivingChannel",
+          "assignedEmployeeLogin",
+          "initiatorName",
+          "initiatorLogin",
+          "lastAssignmentToTeamAt",
+          "waitingExitDate",
+          "isEffect",
+          "isReason",
+          "isDouble",
+          "isMaster",
+          "isRootIncident",
+          "isNeedUp",
+          "eliminationType",
+          "eliminationTypeId",
+          "isPresent",
+          "removedAt",
+          "firstSeenAt",
+          "updatedAt"
+        ],
+        "title": "IncidentDetail",
+        "description": "Полная нормализованная карточка (`/incidents/{id}` → поле `details`)."
+      },
+      "IncidentEnvelope": {
+        "properties": {
+          "incident": {
+            "$ref": "#/components/schemas/IncidentItem"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision",
+            "description": "Ревизия снимка (eventCursor)"
+          },
+          "normalizedState": {
+            "$ref": "#/components/schemas/NormalizedState"
+          },
+          "details": {
+            "$ref": "#/components/schemas/IncidentDetail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "incident",
+          "revision",
+          "normalizedState",
+          "details"
+        ],
+        "title": "IncidentEnvelope",
+        "description": "Ответ `GET /incidents/{sysId}`: API.md `{incident, revision, normalizedState}` + `details`."
+      },
+      "IncidentItem": {
+        "properties": {
+          "sysId": {
+            "type": "string",
+            "title": "Sysid"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "dashboard": {
+            "$ref": "#/components/schemas/DashboardMeta"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "sysId",
+          "id",
+          "dashboard"
+        ],
+        "title": "IncidentItem",
+        "description": "Исходная запись выгрузки МТС «как есть» + `dashboard`.\n\nВсе поля выгрузки передаются без преобразования (`extra=\"allow\"`): даты остаются строками\nисходного формата, `null` остаётся `null`, неизвестные новые поля тоже сохраняются."
+      },
+      "IncidentList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/IncidentItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision"
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nextcursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "revision"
+        ],
+        "title": "IncidentList",
+        "description": "Ответ `GET /incidents` (API.md §7)."
+      },
+      "NormalizedState": {
+        "type": "string",
+        "enum": [
+          "Assigned",
+          "WorkInProgress",
+          "Resolved",
+          "Closed",
+          "Research",
+          "Unknown"
+        ],
+        "title": "NormalizedState",
+        "description": "Нормализованный статус. Значения совпадают с `stateEnum` выгрузки (API.md, `normalizedState`)."
+      },
+      "NotificationPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/NotificationView"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "Новые первыми"
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nextcursor",
+            "description": "Курсор следующей (более старой) страницы"
+          },
+          "unreadCount": {
+            "type": "integer",
+            "title": "Unreadcount"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "nextCursor",
+          "unreadCount"
+        ],
+        "title": "NotificationPage"
+      },
+      "NotificationType": {
+        "type": "string",
+        "enum": [
+          "critical.raised",
+          "coordinator.assigned",
+          "critical.resolved",
+          "source.error",
+          "source.recovered"
+        ],
+        "title": "NotificationType"
+      },
+      "NotificationView": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "type": {
+            "$ref": "#/components/schemas/NotificationType"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "incidentId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incidentid"
+          },
+          "sysId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sysid"
+          },
+          "incidentRevision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incidentrevision"
+          },
+          "changeEventId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changeeventid"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          },
+          "createdAt": {
+            "type": "string",
+            "title": "Createdat"
+          },
+          "isRead": {
+            "type": "boolean",
+            "title": "Isread"
+          },
+          "readAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Readat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "title",
+          "body",
+          "incidentId",
+          "sysId",
+          "incidentRevision",
+          "changeEventId",
+          "createdAt",
+          "isRead",
+          "readAt"
+        ],
+        "title": "NotificationView"
+      },
+      "Resolution": {
+        "properties": {
+          "phase": {
+            "$ref": "#/components/schemas/ResolutionPhase"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "examples": [
+              "Решён",
+              "Решён · исследование"
+            ]
+          },
+          "resolvedAt": {
+            "type": "string",
+            "title": "Resolvedat",
+            "description": "completionDate, либо момент обнаружения перехода"
+          },
+          "resolvedAtSource": {
+            "type": "string",
+            "enum": [
+              "completionDate",
+              "detected"
+            ],
+            "title": "Resolvedatsource"
+          },
+          "detectedAt": {
+            "type": "string",
+            "title": "Detectedat"
+          },
+          "recentlyResolvedUntil": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recentlyresolveduntil",
+            "description": "Окно 24 ч после Resolved/Closed; null, пока идёт исследование"
+          }
+        },
+        "type": "object",
+        "required": [
+          "phase",
+          "label",
+          "resolvedAt",
+          "resolvedAtSource",
+          "detectedAt"
+        ],
+        "title": "Resolution",
+        "description": "Отметка «Решён» у критического инцидента (решение C16)."
+      },
+      "ResolutionPhase": {
+        "type": "string",
+        "enum": [
+          "research",
+          "resolved",
+          "closed"
+        ],
+        "title": "ResolutionPhase"
+      },
+      "SlaInfo": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "no_deadline",
+              "ok",
+              "warning",
+              "overdue",
+              "not_applicable"
+            ],
+            "title": "Status"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "description": "«Срок не задан», «Просрочен», «Осталось 2 ч 10 мин» …"
+          },
+          "deadlineAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadlineat"
+          },
+          "remainingSeconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remainingseconds",
+            "description": "Секунды до дедлайна; отрицательное значение — просрочка"
+          },
+          "computedAt": {
+            "type": "string",
+            "title": "Computedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "label",
+          "computedAt"
+        ],
+        "title": "SlaInfo",
+        "description": "Срок решения. Рассчитан на `computedAt`; клиент ведёт таймер от `deadlineAt` и `serverTime`."
+      },
+      "Snapshot": {
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "title": "Revision",
+            "description": "Монотонная версия снимка"
+          },
+          "serverTime": {
+            "type": "string",
+            "title": "Servertime"
+          },
+          "updatedAt": {
+            "type": "string",
+            "title": "Updatedat",
+            "description": "Время обнаружения последнего изменения данных"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/IncidentItem"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "Все присутствующие в выгрузке инциденты"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeEventView"
+            },
+            "type": "array",
+            "title": "Events",
+            "description": "Последние события, новые первыми"
+          },
+          "source": {
+            "$ref": "#/components/schemas/SourceInfo"
+          },
+          "itsmUrlTemplate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Itsmurltemplate"
+          },
+          "eventCursor": {
+            "type": "string",
+            "title": "Eventcursor",
+            "description": "То же, что revision, строкой (ARCHITECTURE.md)"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/GroupView"
+            },
+            "type": "array",
+            "title": "Groups",
+            "description": "Серверный расчёт четырёх групп"
+          }
+        },
+        "type": "object",
+        "required": [
+          "revision",
+          "serverTime",
+          "updatedAt",
+          "items",
+          "events",
+          "source",
+          "itsmUrlTemplate",
+          "eventCursor",
+          "groups"
+        ],
+        "title": "Snapshot",
+        "description": "Полный согласованный снимок (API.md §3)."
+      },
+      "SourceInfo": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "description": "Читаемое имя источника, без серверного пути"
+          },
+          "readAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Readat",
+            "description": "Последняя успешная проверка/загрузка"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error",
+            "description": "Ошибка источника; предыдущие items сохраняются"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "initializing",
+              "ok",
+              "error"
+            ],
+            "title": "Status"
+          },
+          "lastSuccessfulImportAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lastsuccessfulimportat"
+          },
+          "lastCheckedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lastcheckedat"
+          },
+          "errorSince": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errorsince"
+          },
+          "incidentCount": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incidentcount"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings",
+            "description": "Например, нераспознанные статусы"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "readAt",
+          "error",
+          "status",
+          "lastSuccessfulImportAt",
+          "lastCheckedAt"
+        ],
+        "title": "SourceInfo",
+        "description": "`source` из API.md (`path`, `readAt`, `error`) + состояние импорта из ARCHITECTURE.md."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

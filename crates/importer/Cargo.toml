@@ -1,0 +1,25 @@
+[package]
+name = "dashboard-importer"
+description = "Чтение JSON-источника, транзакция импорта и цикл опроса с advisory lock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dashboard-config.workspace = true
+dashboard-domain.workspace = true
+dashboard-store.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

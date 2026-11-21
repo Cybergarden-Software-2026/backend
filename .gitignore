@@ -1,0 +1,6 @@
+/target/
+.env
+.DS_Store
+data/.demo/
+data/.*.tmp
+__pycache__/

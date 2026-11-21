@@ -1,0 +1,72 @@
+# Запуск: cp .env.example .env && docker compose up -d --build
+# db → migrate → api (http://localhost:8080) + importer
+name: mts-incident-dashboard
+
+x-backend: &backend
+  build:
+    context: .
+    target: runtime
+  image: mts-incident-dashboard-backend
+  env_file: .env
+  environment:
+    JSON_SOURCE_PATH: /data/character_problems.json
+  volumes:
+    # Монтируем каталог, а не файл: так атомарная замена файла (tmp + rename) видна в контейнере.
+    - ./data:/data:ro
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dashboard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-dashboard}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Наружу не публикуется. Для доступа с хоста (psql, cargo test):
+    # ports: ["127.0.0.1:5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  migrate:
+    <<: *backend
+    command: ["/usr/local/bin/migrate"]
+    volumes: []
+    healthcheck:
+      disable: true   # HEALTHCHECK образа — для api
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *backend
+    ports:
+      # За обратным прокси на том же сервере: "127.0.0.1:8080:8080"
+      - "8080:8080"
+    # В distroless нет curl: бинарник сам делает GET /health.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/api", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Одновременно работает один импортёр (advisory lock 0x4D545301); второй экземпляр ждёт.
+  importer:
+    <<: *backend
+    command: ["/usr/local/bin/importer"]
+    healthcheck:
+      disable: true
+
+  # ИИ-модуль (ai-worker, Ollama) подключается отдельно и в этот compose не входит.
+
+volumes:
+  pgdata:

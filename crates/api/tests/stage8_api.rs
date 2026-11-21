@@ -1,0 +1,622 @@
+//! Порт `backend/tests/integration/test_stage8_api.py` (REST API на PostgreSQL) и части
+//! `test_stage7_notifications.py` про `NotificationService` (список с курсором, отметки
+//! прочтения). Нужен `TEST_DATABASE_URL`.
+
+#[path = "../../importer/tests/common/mod.rs"]
+mod common;
+
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::Request;
+use common::*;
+use dashboard_api::{AppState, router};
+use http_body_util::BodyExt;
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+const DEMO_SYS_ID: &str = "179429233402440192";
+
+struct Api {
+    e: Env,
+    app: axum::Router,
+}
+
+struct Res {
+    status: u16,
+    content_type: Option<String>,
+    raw: Vec<u8>,
+}
+
+impl Res {
+    fn json(&self) -> Value {
+        serde_json::from_slice(&self.raw).unwrap()
+    }
+}
+
+impl Api {
+    async fn new() -> Option<Self> {
+        let e = Env::with_vars(&[
+            ("ITSM_BASE_URL", "https://itsm.example"),
+            ("ITSM_URL_TEMPLATE", "{base_url}/incidents/{sysId}"),
+        ])
+        .await?;
+        let app = router(AppState::with_clock(
+            Arc::clone(&e.settings),
+            e.pool().clone(),
+            e.clock.as_clock(),
+        ));
+        Some(Self { e, app })
+    }
+
+    async fn request(&self, method: &str, path: &str, headers: &[(&str, &str)]) -> Res {
+        let mut b = Request::builder().method(method).uri(format!("/api/v1{path}"));
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        let res = self
+            .app
+            .clone()
+            .oneshot(b.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = res.status().as_u16();
+        let content_type = res
+            .headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap().to_owned());
+        let raw = res.into_body().collect().await.unwrap().to_bytes().to_vec();
+        Res {
+            status,
+            content_type,
+            raw,
+        }
+    }
+
+    async fn get(&self, path: &str) -> Res {
+        self.request("GET", path, &[]).await
+    }
+
+    async fn json(&self, path: &str) -> Value {
+        let r = self.get(path).await;
+        assert_eq!(r.status, 200, "{path}: {}", String::from_utf8_lossy(&r.raw));
+        r.json()
+    }
+
+    async fn imported(&mut self, recs: &[Record]) {
+        self.e.write_json(recs);
+        assert!(self.e.tick().await.accepted());
+    }
+
+    async fn finish(self) {
+        self.e.finish().await;
+    }
+}
+
+macro_rules! api {
+    () => {
+        match Api::new().await {
+            Some(api) => api,
+            None => return,
+        }
+    };
+}
+
+// ================================================================ до первого снимка
+
+#[tokio::test]
+async fn status_503_before_first_snapshot() {
+    let api = api!();
+    for path in [
+        "/snapshot",
+        "/dashboard",
+        "/incidents",
+        "/events",
+        &format!("/incidents/{DEMO_ID}"),
+    ] {
+        let r = api.request("GET", path, &[("X-Request-ID", "req-1")]).await;
+        assert_eq!(r.status, 503, "{path}");
+        let body = r.json();
+        assert_eq!(body["code"], "SOURCE_NOT_READY");
+        assert_eq!(body["requestId"], "req-1");
+        assert_eq!(body["error"], body["message"]);
+        assert_eq!(body["source"]["status"], "initializing");
+    }
+    api.finish().await;
+}
+
+// ================================================================ /snapshot (API.md §3)
+
+#[tokio::test]
+async fn snapshot_contract() {
+    let mut api = api!();
+    api.imported(&records()).await;
+    let r = api.get("/snapshot").await;
+    assert_eq!(r.status, 200);
+    assert!(r.content_type.as_deref().unwrap().starts_with("application/json"));
+    let snap = r.json();
+    for key in [
+        "revision",
+        "serverTime",
+        "updatedAt",
+        "items",
+        "events",
+        "source",
+        "itsmUrlTemplate",
+    ] {
+        assert!(snap.get(key).is_some(), "{key}");
+    }
+    assert_eq!(
+        (snap["revision"].clone(), snap["eventCursor"].clone()),
+        (json!(1), json!("1"))
+    );
+    assert!(snap["serverTime"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(snap["itsmUrlTemplate"], "https://itsm.example/incidents/{sysId}");
+    assert_eq!(snap["source"]["error"], Value::Null);
+    assert_eq!(snap["source"]["path"], "character_problems.json");
+    assert_eq!(snap["events"], json!([])); // первичная загрузка
+
+    // API.md §10.1: выгрузка без потери Research, null-дедлайнов и текста solution
+    let items = snap["items"].as_array().unwrap();
+    assert_eq!(items.len(), 44);
+    for source in records() {
+        let mut item = items.iter().find(|i| i["id"] == source["id"]).unwrap().clone();
+        item.as_object_mut().unwrap().shift_remove("dashboard");
+        assert_eq!(item, Value::Object(source));
+    }
+    let counts: Vec<(Value, Value)> = snap["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| (g["key"].clone(), g["count"].clone()))
+        .collect();
+    assert_eq!(
+        counts,
+        [("critical", 0), ("coordinators", 2), ("high", 3), ("research", 5)]
+            .map(|(k, c)| (json!(k), json!(c)))
+    );
+    let demo = items.iter().find(|i| i["id"] == DEMO_ID).unwrap();
+    assert_eq!(
+        demo["dashboard"]["itsmUrl"],
+        format!("https://itsm.example/incidents/{DEMO_SYS_ID}")
+    );
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn deadline_change_bumps_revision_and_events_are_stable() {
+    let mut api = api!();
+    let mut recs = records();
+    api.imported(&recs).await;
+    demo(&mut recs).insert("deadline".into(), s("2026-11-25T12:00:00Z"));
+    api.imported(&recs).await;
+    let first = api.json("/snapshot").await;
+    let second = api.json("/snapshot").await;
+    assert_eq!(first["revision"], 2);
+    let ids = |s: &Value| -> Vec<Value> {
+        s["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["eventId"].clone())
+            .collect()
+    };
+    assert_eq!(ids(&first), ids(&second));
+    let events = first["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(
+        (event["types"].clone(), event["fields"].clone()),
+        (json!(["deadline"]), json!(["deadline"]))
+    );
+    assert_eq!(event["previous"]["deadline"], "2026-11-10T12:32:14Z");
+    assert_eq!(event["current"]["deadline"], "2026-11-25T12:00:00Z");
+    let dash = api.json("/dashboard").await;
+    assert_eq!(dash["eventCursor"], first["revision"].to_string()); // одна последовательность
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn source_error_keeps_items() {
+    let mut api = api!();
+    api.imported(&records()).await;
+    api.e.write_text("[{");
+    api.e.tick().await;
+    api.e.tick().await;
+    let snap = api.json("/snapshot").await;
+    assert_eq!(snap["items"].as_array().unwrap().len(), 44);
+    assert_eq!(snap["source"]["status"], "error");
+    assert!(
+        snap["source"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("некорректный JSON")
+    );
+    api.finish().await;
+}
+
+// ================================================================ /dashboard (ARCHITECTURE.md)
+
+#[tokio::test]
+async fn dashboard_demo_step_1() {
+    let mut api = api!();
+    let mut recs = records();
+    api.imported(&recs).await;
+    update(
+        demo(&mut recs),
+        &[
+            ("priorityId", json!(4)),
+            ("priority", s("Наивысший")),
+            ("assignedGroupName", s(COORD)),
+        ],
+    );
+    api.imported(&recs).await;
+    let dash = api.json("/dashboard").await;
+    let group = |key: &str| -> Vec<Value> {
+        dash["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["key"] == key)
+            .unwrap()["incidentIds"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert!(group("critical").contains(&s(DEMO_ID)) && group("coordinators").contains(&s(DEMO_ID)));
+    assert!(!group("high").contains(&s(DEMO_ID)));
+    let card = &dash["incidents"][DEMO_ID];
+    assert_eq!(card["incidentRevision"], 2);
+    assert_eq!(card["status"], "in_progress");
+    assert_eq!(card["priorityId"], 4);
+    assert_eq!(card["groups"], json!(["critical", "coordinators"]));
+    api.finish().await;
+}
+
+// ================================================================ /incidents
+
+#[tokio::test]
+async fn incident_by_sys_id_and_by_number() {
+    let mut api = api!();
+    api.imported(&records()).await;
+    let by_sys = api.json(&format!("/incidents/{DEMO_SYS_ID}")).await;
+    let by_id = api.json(&format!("/incidents/{}", DEMO_ID.to_lowercase())).await;
+    assert_eq!(by_sys, by_id);
+    assert_eq!(by_sys["incident"]["id"], DEMO_ID);
+    assert_eq!(by_sys["normalizedState"], "WorkInProgress");
+    assert_eq!(by_sys["revision"], 1);
+    assert_eq!(by_sys["details"]["incidentRevision"], 1);
+    assert!(
+        by_sys["details"]["itsmUrl"]
+            .as_str()
+            .unwrap()
+            .ends_with(DEMO_SYS_ID)
+    );
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn unknown_incident_404() {
+    let mut api = api!();
+    api.imported(&records()).await;
+    for key in ["INC000000000000", "123", "nonsense"] {
+        let r = api.get(&format!("/incidents/{key}")).await;
+        assert_eq!(r.status, 404, "{key}");
+        assert_eq!(r.json()["code"], "INCIDENT_NOT_FOUND");
+    }
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn incident_list_filters_and_cursor() {
+    let mut api = api!();
+    let mut recs = records();
+    api.imported(&recs).await;
+    assert_eq!(
+        api.json("/incidents?group=research").await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    let r = api.json("/incidents?priorityId=3&state=WorkInProgress").await;
+    let ids: Vec<&Value> = r["items"].as_array().unwrap().iter().map(|i| &i["id"]).collect();
+    assert_eq!(ids, [&s(DEMO_ID)]);
+
+    let page1 = api.json("/incidents?limit=20").await;
+    let c1 = page1["nextCursor"].as_str().unwrap().to_owned();
+    let page2 = api.json(&format!("/incidents?limit=20&cursor={c1}")).await;
+    let c2 = page2["nextCursor"].as_str().unwrap().to_owned();
+    let page3 = api.json(&format!("/incidents?limit=20&cursor={c2}")).await;
+    let len = |p: &Value| p["items"].as_array().unwrap().len();
+    assert_eq!(len(&page1) + len(&page2) + len(&page3), 44);
+    assert_eq!(page3["nextCursor"], Value::Null);
+
+    demo(&mut recs).insert("header".into(), s("Изменено"));
+    api.imported(&recs).await;
+    let stale = api.get(&format!("/incidents?limit=20&cursor={c1}")).await;
+    assert_eq!(stale.status, 409);
+    assert_eq!(stale.json()["code"], "CURSOR_EXPIRED");
+    assert_eq!(stale.json()["currentRevision"], 2);
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn incident_list_bad_params() {
+    let mut api = api!();
+    api.imported(&records()).await;
+    for (query, code) in [
+        ("priorityId=9", "VALIDATION_ERROR"),
+        ("group=vip", "VALIDATION_ERROR"),
+        ("sort=color", "INVALID_SORT"),
+        ("cursor=%25%25%25", "INVALID_CURSOR"),
+    ] {
+        let r = api.get(&format!("/incidents?{query}")).await;
+        assert_eq!(r.status, 400, "{query}");
+        assert_eq!(r.json()["code"], code, "{query}");
+    }
+    api.finish().await;
+}
+
+// ================================================================ /events
+
+#[tokio::test]
+async fn events_journal_filters_and_paging() {
+    let mut api = api!();
+    let mut recs = records();
+    api.imported(&recs).await;
+    for n in 0..3 {
+        demo(&mut recs).insert("deadline".into(), s(&format!("2026-11-2{}T12:00:00Z", n + 1)));
+        api.imported(&recs).await;
+    }
+    demo(&mut recs).insert("priorityId".into(), json!(4));
+    api.imported(&recs).await;
+
+    let all = api.json("/events").await["items"].as_array().unwrap().clone();
+    let types: Vec<&Value> = all.iter().map(|e| &e["types"]).collect();
+    assert_eq!(
+        types,
+        [
+            &json!(["critical", "priority"]),
+            &json!(["deadline"]),
+            &json!(["deadline"]),
+            &json!(["deadline"])
+        ]
+    );
+    let ids: Vec<i64> = all.iter().map(|e| e["eventId"].as_i64().unwrap()).collect();
+    assert!(ids.windows(2).all(|w| w[0] > w[1]));
+
+    let page = api.json("/events?limit=2").await;
+    let page_ids: Vec<i64> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["eventId"].as_i64().unwrap())
+        .collect();
+    assert_eq!(page_ids, ids[..2]);
+    assert_eq!(page["nextCursor"], ids[1].to_string());
+    let rest = api.json(&format!("/events?beforeId={}", ids[1])).await;
+    let rest_ids: Vec<i64> = rest["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["eventId"].as_i64().unwrap())
+        .collect();
+    assert_eq!(rest_ids, ids[2..]);
+    assert_eq!(rest["nextCursor"], Value::Null);
+
+    let count = |v: Value| v["items"].as_array().unwrap().len();
+    assert_eq!(count(api.json("/events?type=critical").await), 1);
+    assert_eq!(count(api.json(&format!("/events?afterId={}", ids[2])).await), 2);
+    assert_eq!(
+        count(api.json(&format!("/events?incidentSysId={DEMO_SYS_ID}")).await),
+        4
+    );
+    assert_eq!(count(api.json("/events?incidentSysId=1").await), 0);
+    let history = api.json(&format!("/incidents/{DEMO_SYS_ID}/events")).await;
+    let history_ids: Vec<i64> = history["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["eventId"].as_i64().unwrap())
+        .collect();
+    assert_eq!(history_ids, ids);
+
+    assert_eq!(api.get("/events?type=bogus").await.status, 400);
+    assert_eq!(
+        api.get("/events?beforeId=x").await.json()["code"],
+        "INVALID_CURSOR"
+    );
+    api.finish().await;
+}
+
+// ================================================================ /notifications
+
+#[tokio::test]
+async fn notifications_api() {
+    let mut api = api!();
+    let mut recs = records();
+    api.imported(&recs).await;
+    update(
+        demo(&mut recs),
+        &[("priorityId", json!(4)), ("assignedGroupName", s(COORD))],
+    );
+    api.imported(&recs).await;
+
+    let page = api.json("/notifications").await;
+    let types: Vec<&Value> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| &n["type"])
+        .collect();
+    assert_eq!(types, [&s("coordinator.assigned"), &s("critical.raised")]);
+    assert_eq!(page["unreadCount"], 2);
+    assert_eq!(page["nextCursor"], Value::Null);
+    assert_eq!(page["items"][0]["incidentId"], DEMO_ID);
+    assert_eq!(page["items"][0]["isRead"], false);
+    let target = page["items"][0]["id"].as_i64().unwrap();
+
+    for _ in 0..2 {
+        // идемпотентно
+        let r = api
+            .request(
+                "PUT",
+                &format!("/notifications/{target}/read"),
+                &[("X-User-Id", "alice")],
+            )
+            .await;
+        assert_eq!(r.status, 204);
+        assert!(r.raw.is_empty());
+    }
+    let alice = api
+        .request("GET", "/notifications", &[("X-User-Id", "alice")])
+        .await
+        .json();
+    let default = api.json("/notifications").await;
+    assert_eq!(
+        (alice["unreadCount"].clone(), default["unreadCount"].clone()),
+        (json!(1), json!(2))
+    );
+    let read = alice["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == target)
+        .unwrap();
+    assert_ne!(read["readAt"], Value::Null);
+
+    assert_eq!(
+        api.request("PUT", "/notifications/999999/read", &[]).await.status,
+        404
+    );
+    assert_eq!(api.get("/notifications?cursor=abc").await.status, 400);
+    assert_eq!(
+        api.request("GET", "/notifications", &[("X-User-Id", "bad user!")])
+            .await
+            .status,
+        400
+    );
+    let page1 = api.json("/notifications?limit=1").await;
+    let page2 = api
+        .json(&format!(
+            "/notifications?limit=1&cursor={}",
+            page1["nextCursor"].as_str().unwrap()
+        ))
+        .await;
+    assert!(page1["items"][0]["id"].as_i64() > page2["items"][0]["id"].as_i64());
+    assert_eq!(page2["nextCursor"], Value::Null);
+    api.finish().await;
+}
+
+/// `test_notification_list_cursor_and_reads` (этап 7): курсор, отметки у каждого своё,
+/// повторная отметка не меняет время прочтения.
+#[tokio::test]
+async fn notification_list_cursor_and_reads() {
+    let mut api = api!();
+    let mut recs = records();
+    api.imported(&recs).await;
+    for group in [COORD, "ОГЭ Приморье", COORD, "ОГЭ Приморье", COORD] {
+        demo(&mut recs).insert("assignedGroupName".into(), s(group)); // 3 назначения
+        api.imported(&recs).await;
+    }
+    let alice = [("X-User-Id", "alice")];
+    let page1 = api.request("GET", "/notifications?limit=2", &alice).await.json();
+    let items = page1["items"].as_array().unwrap();
+    assert!(items.iter().all(|n| n["type"] == "coordinator.assigned") && items.len() == 2);
+    assert!(items[0]["id"].as_i64() > items[1]["id"].as_i64()); // новые первыми
+    assert_eq!(page1["unreadCount"], 3);
+    assert_eq!(page1["nextCursor"], items[1]["id"].to_string());
+    let page2 = api
+        .request(
+            "GET",
+            &format!(
+                "/notifications?limit=2&cursor={}",
+                page1["nextCursor"].as_str().unwrap()
+            ),
+            &alice,
+        )
+        .await
+        .json();
+    assert_eq!(page2["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page2["nextCursor"], Value::Null);
+
+    let target = items[0]["id"].as_i64().unwrap();
+    let read_at = format!("SELECT read_at FROM notification_reads WHERE notification_id = {target}");
+    for _ in 0..2 {
+        api.request("PUT", &format!("/notifications/{target}/read"), &alice)
+            .await;
+    }
+    let first_read = api.e.time(&read_at).await;
+    api.e.clock.advance(60.0);
+    api.request("PUT", &format!("/notifications/{target}/read"), &alice)
+        .await;
+    assert_eq!(api.e.time(&read_at).await, first_read);
+
+    let alice_page = api.request("GET", "/notifications", &alice).await.json();
+    let bob_page = api
+        .request("GET", "/notifications", &[("X-User-Id", "bob")])
+        .await
+        .json();
+    assert_eq!(
+        (alice_page["unreadCount"].clone(), bob_page["unreadCount"].clone()),
+        (json!(2), json!(3))
+    );
+    let n = alice_page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == target)
+        .unwrap();
+    assert_eq!(n["isRead"], true);
+    assert!(
+        bob_page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|n| n["isRead"] == false)
+    );
+    let missing = api.request("PUT", "/notifications/999999/read", &alice).await;
+    assert_eq!(missing.json()["code"], "NOTIFICATION_NOT_FOUND");
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn source_notifications_listed() {
+    let mut api = api!();
+    api.imported(&records()).await;
+    api.e.write_text("{broken");
+    api.e.tick().await;
+    api.e.tick().await;
+    api.imported(&records()).await;
+    let page = api.json("/notifications").await;
+    let types: Vec<&Value> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| &n["type"])
+        .collect();
+    assert_eq!(types, [&s("source.recovered"), &s("source.error")]);
+    assert_eq!(page["items"][1]["incidentId"], Value::Null);
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn openapi_lists_all_routes() {
+    let api = api!();
+    let spec = api.json("/openapi.json").await;
+    for path in [
+        "/api/v1/snapshot",
+        "/api/v1/dashboard",
+        "/api/v1/incidents",
+        "/api/v1/incidents/{key}",
+        "/api/v1/incidents/{key}/events",
+        "/api/v1/events",
+        "/api/v1/notifications",
+        "/api/v1/notifications/{notification_id}/read",
+    ] {
+        assert!(spec["paths"].get(path).is_some(), "{path}");
+    }
+    assert_eq!(spec["info"]["title"], api.e.settings.app_name.as_str());
+    api.finish().await;
+}

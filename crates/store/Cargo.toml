@@ -1,0 +1,22 @@
+[package]
+name = "dashboard-store"
+description = "PostgreSQL через sqlx: пул, миграции на общем SQL Python-версии, репозитории"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dashboard-config.workspace = true
+dashboard-domain.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+
+[dev-dependencies]
+tokio.workspace = true

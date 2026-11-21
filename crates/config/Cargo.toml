@@ -1,0 +1,13 @@
+[package]
+name = "dashboard-config"
+description = "Настройки процесса: те же переменные окружения и .env, что у Python-версии (app/config.py)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono-tz.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
