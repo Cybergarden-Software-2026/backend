@@ -53,6 +53,7 @@ pub struct Settings {
     pub log_level: String,
     pub cors_origins: Vec<String>,
     pub default_user_id: String,
+    pub coordinator_access_key: Option<CoordinatorAccessKey>,
 
     // --- HTTP (только Rust-версия: у Python адрес задаётся аргументами uvicorn) ---
     pub api_host: String,
@@ -122,6 +123,21 @@ pub struct Settings {
 #[error("invalid configuration:\n  - {}", .problems.join("\n  - "))]
 pub struct ConfigError {
     pub problems: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct CoordinatorAccessKey(String);
+
+impl CoordinatorAccessKey {
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl fmt::Debug for CoordinatorAccessKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[redacted]")
+    }
 }
 
 impl Settings {
@@ -266,12 +282,25 @@ impl Settings {
             );
         }
 
+        let coordinator_access_key = r.raw("coordinator_access_key").and_then(|key| {
+            if (32..=256).contains(&key.len()) && key.bytes().all(|byte| byte.is_ascii_graphic()) {
+                Some(CoordinatorAccessKey(key.to_owned()))
+            } else {
+                r.problem(
+                    "COORDINATOR_ACCESS_KEY",
+                    "expected 32 to 256 printable ASCII characters without spaces".into(),
+                );
+                None
+            }
+        });
+
         let settings = Settings {
             app_name: r.string("app_name", "MTS Incident Coordinator Dashboard"),
             environment,
             log_level: r.string("log_level", "INFO"),
             cors_origins,
             default_user_id: r.string("default_user_id", "coordinator"),
+            coordinator_access_key,
             api_host: r.string("api_host", "0.0.0.0"),
             api_port: r.number("api_port", 8080u16, |_| true, ""),
             database_url,
@@ -492,6 +521,28 @@ mod tests {
         assert_eq!(s.db_max_connections(), 20);
         assert_eq!(s.api_port, 8080);
         assert!(s.cors_origins.is_empty());
+        assert!(s.coordinator_access_key.is_none());
+    }
+
+    #[test]
+    fn coordinator_access_key_validation_redacts_value() {
+        let short = "a-test-value-that-must-not-appear";
+        for value in [
+            "",
+            &short[..16],
+            "with a space and enough characters to pass the length check",
+        ] {
+            let error = with(&[("COORDINATOR_ACCESS_KEY", value)])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("COORDINATOR_ACCESS_KEY"));
+            if !value.is_empty() {
+                assert!(!error.contains(value));
+            }
+        }
+        let test_key = "coordinator-session-key-use-only-in-tests";
+        let settings = with(&[("COORDINATOR_ACCESS_KEY", test_key)]).unwrap();
+        assert!(!format!("{settings:?}").contains(test_key));
     }
 
     #[test]

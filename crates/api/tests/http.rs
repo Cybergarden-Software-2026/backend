@@ -138,6 +138,7 @@ async fn cors_only_when_configured() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["access-control-allow-origin"], "http://localhost:5173");
     assert_eq!(headers["access-control-allow-headers"], "x-custom");
+    assert_eq!(headers["access-control-allow-credentials"], "true");
 
     let req = Request::get("/health")
         .header("Origin", "http://localhost:5173")

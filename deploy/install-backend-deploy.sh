@@ -14,7 +14,7 @@ flock -n 9 || { echo 'A backend deployment is running. Try again afterwards.' >&
 config=/etc/underctrl-backend-deploy
 install -d -m 0755 "$config"
 install -m 0644 "$source_dir/docker-compose.yml" "$source_dir/compose.vserver.yml" \
-  "$source_dir/deploy/compose.image.yml" "$config/"
+  "$source_dir/deploy/compose.image.yml" "$source_dir/deploy/check-backend.py" "$config/"
 install -m 0755 "$source_dir/deploy/deploy-backend.sh" /usr/local/sbin/underctrl-backend-deploy
 install -m 0644 "$source_dir/deploy/underctrl-backend-deploy.service" \
   "$source_dir/deploy/underctrl-backend-deploy.timer" /etc/systemd/system/
