@@ -92,3 +92,23 @@ docker compose logs -f importer         # «Снимок принят: revision=
 или пересоздание тома.
 
 ИИ-модуль в этот compose не входит и разворачивается отдельно.
+
+## Запуск на vserver
+
+Для этого варианта используйте Docker Engine 28 или новее и Docker Compose
+2.24.4 или новее. Из корня репозитория с настроенным `.env` выполните:
+
+```bash
+dc() { sudo docker compose -f docker-compose.yml -f compose.vserver.yml "$@"; }
+dc config --quiet
+dc build api
+dc up -d --no-build
+dc ps --all
+curl --noproxy '*' -fsS http://127.0.0.1:8001/health/ready
+```
+
+API слушает порт `8080` внутри контейнера и доступен хостовому Nginx на
+`127.0.0.1:8001`. PostgreSQL доступен сервисам через сеть Compose. Хостовый
+`127.0.0.1:8080` используется Qwen. В выводе `dc ps --all` ожидаются
+`Exited (0)` для миграции и `healthy` для API после запуска. Готовность
+проверяется ответом `"database":true` на `/health/ready`.
