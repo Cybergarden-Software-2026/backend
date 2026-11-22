@@ -21,6 +21,7 @@ pub mod health;
 mod mass_problems;
 mod mobile;
 pub mod mobile_delivery;
+mod mobile_incidents;
 pub mod notifications;
 pub mod params;
 pub mod request_id;

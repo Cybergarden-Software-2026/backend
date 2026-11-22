@@ -21,6 +21,7 @@ const CURRENT: &str = "/api/v1/mobile/devices/current";
 const TOKEN: &str = "/api/v1/mobile/devices/current/token";
 const SESSION: &str = "/api/v1/mobile/session";
 const INBOX: &str = "/api/v1/mobile/notifications";
+const INCIDENTS: &str = "/api/v1/mobile/incidents";
 const ENABLED: &[(&str, &str)] = &[
     ("COORDINATOR_ACCOUNTS_ENABLED", "true"),
     ("MOBILE_PUSH_ENABLED", "true"),
@@ -148,6 +149,7 @@ async fn login_requires_personal_accounts_and_fcm_registration_requires_push() {
                 ("GET", SESSION),
                 ("DELETE", SESSION),
                 ("GET", INBOX),
+                ("GET", INCIDENTS),
             ] {
                 let body = read(
                     call(&app, method, path, &[], None).await,
@@ -322,6 +324,7 @@ async fn mobile_credentials_are_device_scoped_and_owner_controls_revocation() {
         ("GET", "/api/v1/snapshot"),
         ("GET", SESSION),
         ("GET", INBOX),
+        ("GET", INCIDENTS),
         ("DELETE", SESSION),
     ] {
         assert_eq!(
@@ -515,7 +518,7 @@ async fn qr_login_without_firebase_authenticates_the_account_and_its_notificatio
         call(&app, "DELETE", SESSION, &as_alice, None).await.status(),
         StatusCode::NO_CONTENT
     );
-    for path in [SESSION, INBOX] {
+    for path in [SESSION, INBOX, INCIDENTS] {
         let unauthorized = read(
             call(&app, "GET", path, &as_alice, None).await,
             StatusCode::UNAUTHORIZED,
@@ -523,6 +526,164 @@ async fn qr_login_without_firebase_authenticates_the_account_and_its_notificatio
         .await;
         assert_eq!(unauthorized["code"], "MOBILE_SESSION_UNAUTHORIZED");
     }
+    env.finish().await;
+}
+
+#[tokio::test]
+async fn mobile_incidents_returns_the_complete_current_header_input_without_firebase() {
+    let Some(mut env) = Env::with_vars(&[
+        ("COORDINATOR_ACCOUNTS_ENABLED", "true"),
+        ("SOURCE_NAIVE_TIMEZONE", "Europe/Moscow"),
+    ])
+    .await
+    else {
+        return;
+    };
+    let app = router(AppState::with_clock(
+        env.settings.clone(),
+        env.pool().clone(),
+        env.clock.as_clock(),
+    ));
+    let cookie = owner(&env, &app, "reader").await;
+    for headers in [vec![], vec![("cookie", cookie.as_str())]] {
+        let denied = read(
+            call(&app, "GET", INCIDENTS, &headers, None).await,
+            StatusCode::UNAUTHORIZED,
+        )
+        .await;
+        assert_eq!(denied["code"], "MOBILE_SESSION_UNAUTHORIZED");
+    }
+    let code = pairing(&app, &cookie).await;
+    let session = read(
+        login_device(&app, &code, "reader-phone").await,
+        StatusCode::CREATED,
+    )
+    .await;
+    let bearer = format!("Bearer {}", session["token"].as_str().unwrap());
+    let headers = [("authorization", bearer.as_str())];
+    let before_import = read(
+        call(&app, "GET", INCIDENTS, &headers, None).await,
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+    assert_eq!(before_import["code"], "SOURCE_NOT_READY");
+    assert!(before_import.get("source").is_none());
+
+    let mut template = common::records().remove(0);
+    common::update(
+        &mut template,
+        &[
+            ("header", json!("Network fault")),
+            ("stateEnum", json!("Assigned")),
+            ("stateId", json!(0)),
+            ("priorityId", json!(1)),
+            ("assignedGroupName", json!("Team A")),
+            ("submitDate", json!("2026-11-20 14:00:00.123456")),
+            ("deadline", json!("2026-11-20 15:05:00.987654")),
+            (
+                "lastAssignmentToTeamDateTime",
+                json!("2026-11-20 14:45:00.456789"),
+            ),
+        ],
+    );
+    let mut incidents = vec![template; 102];
+    for (index, row) in incidents.iter_mut().enumerate() {
+        row.insert("id".into(), json!(format!("INC{index:04}")));
+        row.insert("sysId".into(), json!(format!("{index:06}")));
+    }
+    common::update(
+        &mut incidents[0],
+        &[("stateEnum", json!("Research")), ("priorityId", json!(4))],
+    );
+    common::update(
+        &mut incidents[1],
+        &[
+            ("assignedGroupName", json!(common::COORD)),
+            ("lastAssignmentToTeamDateTime", Value::Null),
+        ],
+    );
+    common::update(
+        &mut incidents[3],
+        &[("stateEnum", json!("Closed")), ("priorityId", json!(4))],
+    );
+    common::update(
+        &mut incidents[4],
+        &[("stateEnum", json!("Resolved")), ("priorityId", json!(4))],
+    );
+    common::update(
+        &mut incidents[5],
+        &[
+            ("assignedGroupName", Value::Null),
+            ("deadline", Value::Null),
+            ("header", Value::Null),
+        ],
+    );
+    // JS trims a BOM but preserves NEL. Either character can come from a copied team name.
+    for (index, prefix) in [(6, '\u{feff}'), (7, '\u{0085}')] {
+        common::update(
+            &mut incidents[index],
+            &[
+                ("assignedGroupName", json!(format!("{prefix}{}", common::COORD))),
+                ("deadline", Value::Null),
+            ],
+        );
+    }
+    // The former snapshot's only row must disappear; all 101 remaining rows must fit in one response.
+    env.write_json(&incidents[101..]);
+    assert!(env.tick().await.accepted());
+    env.write_json(&incidents[..101]);
+    assert!(env.tick().await.accepted());
+    let snapshot = read(call(&app, "GET", INCIDENTS, &headers, None).await, StatusCode::OK).await;
+    assert_eq!(snapshot["serverTime"], "2026-11-20T12:00:02.000Z");
+    assert_eq!(
+        snapshot["revision"],
+        env.i64("SELECT MAX(id) FROM dashboard_events").await
+    );
+    let mut rows = snapshot["items"].as_array().unwrap().clone();
+    rows.sort_by(|a, b| a["sysId"].as_str().cmp(&b["sysId"].as_str()));
+    assert_eq!(rows.len(), 101);
+    for (row, expected) in rows.iter().zip(&incidents) {
+        assert_eq!(row["sysId"], expected["sysId"]);
+    }
+    assert_eq!(
+        rows[0],
+        json!({
+            "sysId":"000000", "id":"INC0000", "header":"Network fault", "normalizedState":"Research",
+            "priorityId":4, "assignedGroupName":"Team A", "submitDate":"2026-11-20T11:00:00.123Z",
+            "deadline":"2026-11-20T12:05:00.987Z", "lastAssignmentToTeamDateTime":"2026-11-20T11:45:00.456Z",
+            "headerKind":"critical"
+        })
+    );
+    assert_eq!(rows[1]["headerKind"], "waiting");
+    assert!(rows[1]["lastAssignmentToTeamDateTime"].is_null());
+    assert_eq!(rows[2]["headerKind"], "deadline");
+    assert_eq!(rows[6]["headerKind"], "waiting");
+    assert_eq!(rows[6]["assignedGroupName"], common::COORD);
+    assert_eq!(rows[7].get("headerKind"), Some(&Value::Null));
+    assert_eq!(rows[3]["normalizedState"], "Closed");
+    assert_eq!(rows[4]["normalizedState"], "Resolved");
+    for row in &rows[3..=5] {
+        assert_eq!(row.get("headerKind"), Some(&Value::Null));
+    }
+    for key in ["header", "deadline", "assignedGroupName"] {
+        assert_eq!(rows[5].get(key), Some(&Value::Null));
+    }
+    env.clock.advance(300.0);
+    let later = read(call(&app, "GET", INCIDENTS, &headers, None).await, StatusCode::OK).await;
+    assert_eq!(later["revision"], snapshot["revision"]);
+    assert_eq!(later["serverTime"], "2026-11-20T12:05:02.000Z");
+    let expired = later["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["sysId"] == "000002")
+        .unwrap();
+    assert_eq!(expired.get("headerKind"), Some(&Value::Null));
+
+    env.write_json(&[]);
+    assert!(env.tick().await.accepted());
+    let empty = read(call(&app, "GET", INCIDENTS, &headers, None).await, StatusCode::OK).await;
+    assert_eq!(empty["items"], json!([]));
     env.finish().await;
 }
 

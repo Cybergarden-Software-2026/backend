@@ -2008,6 +2008,49 @@
         }
       }
     },
+    "/api/v1/mobile/incidents": {
+      "get": {
+        "tags": [
+          "Mobile account"
+        ],
+        "operationId": "list_mobile_incidents",
+        "summary": "List current incidents and their header status",
+        "description": "Returns all incidents still present in the latest accepted snapshot, including resolved and closed records. No pagination. Each headerKind is computed at serverTime and can change between requests at the same revision. Firebase registration is optional.",
+        "security": [
+          {
+            "MobileSessionBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current incidents from one snapshot revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileIncidentSnapshot"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/MobileSessionUnauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/MobileInternalError"
+          },
+          "503": {
+            "description": "Personal coordinator accounts are disabled (MOBILE_ACCOUNTS_DISABLED), or the first source snapshot has not yet been accepted (SOURCE_NOT_READY).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/mobile/notifications": {
       "get": {
         "tags": [
@@ -4802,6 +4845,106 @@
             "default": "android"
           }
         }
+      },
+      "MobileCurrentIncident": {
+        "type": "object",
+        "properties": {
+          "sysId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "header": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "normalizedState": {
+            "$ref": "#/components/schemas/NormalizedState"
+          },
+          "priorityId": {
+            "type": "integer"
+          },
+          "assignedGroupName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "submitDate": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC timestamp with millisecond precision."
+          },
+          "deadline": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "UTC timestamp with millisecond precision when present."
+          },
+          "lastAssignmentToTeamDateTime": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "UTC timestamp with millisecond precision when present."
+          },
+          "headerKind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "critical",
+              "waiting",
+              "deadline",
+              null
+            ],
+            "description": "At serverTime, only Assigned, WorkInProgress or Research may qualify. In precedence order: priorityId 4; waiting on the coordinator team for strictly more than 8 minutes since last assignment (fallback submitDate); or strictly less than 20% of the submitDate-to-deadline interval left. The deadline test requires registration at or before serverTime and deadline after registration. At or past deadline it applies only to an unassigned or coordinator-owned incident. Null means no header card."
+          }
+        },
+        "required": [
+          "sysId",
+          "id",
+          "header",
+          "normalizedState",
+          "priorityId",
+          "assignedGroupName",
+          "submitDate",
+          "deadline",
+          "lastAssignmentToTeamDateTime",
+          "headerKind"
+        ]
+      },
+      "MobileIncidentSnapshot": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "serverTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC timestamp with millisecond precision."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MobileCurrentIncident"
+            }
+          }
+        },
+        "required": [
+          "revision",
+          "serverTime",
+          "items"
+        ]
       },
       "MobileSession": {
         "type": "object",
