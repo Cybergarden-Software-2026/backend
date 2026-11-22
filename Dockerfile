@@ -15,6 +15,8 @@ ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot
 # ---------- тесты: PostgreSQL подключается при запуске контейнера ----------
 FROM ${RUST_IMAGE} AS test
 WORKDIR /src
+# Тестовому образу не нужны отладочные символы и инкрементальный кэш.
+ENV CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
 COPY . ./
 RUN cargo test --workspace --locked --no-run
 CMD ["cargo", "test", "--workspace", "--locked", "--offline"]
