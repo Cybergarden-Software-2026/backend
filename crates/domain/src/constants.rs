@@ -8,6 +8,9 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+/// Namespace for incidents created from the web form.
+pub const FORM_INCIDENT_SYS_ID_PREFIX: &str = "web-form-";
+
 /// Ошибка разбора строкового значения перечисления (аналог `ValueError` у `StrEnum("…")`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("'{value}' is not a valid {enum_name}")]

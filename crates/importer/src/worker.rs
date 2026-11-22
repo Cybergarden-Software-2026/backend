@@ -158,9 +158,12 @@ pub async fn run_importer(settings: Arc<Settings>, mut stop: StopSignal) -> Resu
     let Some(mut lock_conn) = acquire_lock(&settings, &mut stop).await else {
         return Ok(());
     };
-    ImporterWorker::new(ImportService::new(pool.clone(), settings))
-        .run(stop)
-        .await;
+    let form_service = ImportService::new(pool.clone(), Arc::clone(&settings));
+    let mut file_worker = ImporterWorker::new(ImportService::new(pool.clone(), settings));
+    tokio::join!(
+        file_worker.run(stop.clone()),
+        crate::form_worker::run(form_service, stop)
+    );
     let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(IMPORTER_LOCK_KEY)
         .execute(&mut lock_conn)

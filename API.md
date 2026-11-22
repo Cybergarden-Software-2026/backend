@@ -18,6 +18,7 @@ Status reflects the committed implementation in the owning repository. Productio
 | Mobile team-contact button and dedicated frontend journal label | `frontend-web` | Not implemented |
 | `GET /api/v1/snapshot` and `GET /api/v1/dashboard` | `backend` | Implemented |
 | `GET /api/v1/incidents` with page and cursor pagination, and `GET /api/v1/incidents/{key}?view=web` | `backend` | Implemented |
+| Import web-form reports into the incident queue and publish them through the existing snapshot and event stream | `backend` | Implemented (enabled per deployment) |
 | `GET /api/v1/teams` and rules-based `GET /api/v1/incidents/{key}/analysis` | `backend` | Implemented |
 | LLM summary and team suggestion in `GET /api/v1/incidents/{key}/analysis` (`provider: "llm"`, background `ai-worker`, `LLM_ENABLED`) | `backend` | Implemented (verified with a mock model; enabled per deployment) |
 | `POST /api/v1/incidents/{sysId}/assignment` with revision checking | `backend` and `frontend-web` | Implemented |
@@ -104,6 +105,8 @@ Both `android` and `web` registrations receive one FCM message per incident that
 ## 1. Get a snapshot and find incident identifiers
 
 `GET /snapshot?view=web` returns JSON. The first successful import makes the snapshot available. If the source later stops updating, the API continues serving the most recent accepted snapshot with information about the source's condition.
+
+With web-form import enabled, a report makes the queue and snapshot available even before the first successful ITSM import. Reports produce the usual creation events. They start in `Assigned` with the configured coordinator group, use ticket numbers starting with `INC-WEB-`, and return `null` for `dashboard.itsmUrl`. The snapshot's `source` field describes the ITSM JSON export. See the [deployment guide](DEPLOY.md#заявки-из-веб-формы).
 
 | Field | Type and meaning |
 |---|---|

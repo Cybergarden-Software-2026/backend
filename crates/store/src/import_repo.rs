@@ -155,11 +155,62 @@ pub async fn stored_by_sys_id(
     row.as_ref().map(stored_from_row).transpose()
 }
 
-/// Весь реестр (включая выбывшие записи) по возрастанию pk — вход плана импорта.
-pub async fn all_incidents(conn: &mut PgConnection) -> Result<Vec<StoredIncident>, sqlx::Error> {
-    let sql = format!("SELECT {STORED_COLUMNS} FROM incidents ORDER BY pk");
+/// Реестр ITSM, включая выбывшие записи, по возрастанию pk.
+pub async fn itsm_incidents(conn: &mut PgConnection) -> Result<Vec<StoredIncident>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {STORED_COLUMNS} FROM incidents
+         WHERE NOT EXISTS (SELECT 1 FROM form_incidents f WHERE f.incident_id = incidents.id)
+         ORDER BY pk"
+    );
     let rows = sqlx::query(AssertSqlSafe(sql)).fetch_all(conn).await?;
     rows.iter().map(stored_from_row).collect()
+}
+
+pub async fn forms_cursor(conn: &mut PgConnection) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT cursor FROM forms_import_state WHERE id = 1")
+        .fetch_one(conn)
+        .await
+}
+
+pub async fn forms_have_incidents(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM form_incidents)")
+        .fetch_one(conn)
+        .await
+}
+
+pub async fn known_form_answers(
+    conn: &mut PgConnection,
+    form_id: &str,
+    answer_ids: &[&str],
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT answer_id FROM form_incidents WHERE form_id = $1 AND answer_id = ANY($2)")
+        .bind(form_id)
+        .bind(answer_ids)
+        .fetch_all(conn)
+        .await
+}
+
+pub async fn record_form_incident(
+    conn: &mut PgConnection,
+    form_id: &str,
+    answer_id: &str,
+    incident_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO form_incidents (form_id, answer_id, incident_id) VALUES ($1, $2, $3)")
+        .bind(form_id)
+        .bind(answer_id)
+        .bind(incident_id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+pub async fn save_forms_cursor(conn: &mut PgConnection, cursor: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE forms_import_state SET cursor = $1 WHERE id = 1")
+        .bind(cursor)
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 fn decode_err(column: &str, message: impl std::fmt::Display) -> sqlx::Error {

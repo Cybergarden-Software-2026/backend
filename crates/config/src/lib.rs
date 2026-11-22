@@ -18,6 +18,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use chrono_tz::Tz;
+use url::{Host, Url};
 
 pub mod dotenv;
 
@@ -76,6 +77,7 @@ pub struct Settings {
     pub import_stable_read_delay: Duration,
     pub source_naive_timezone: Tz,
     pub importer_embedded: bool,
+    pub incident_form_relay: Option<IncidentFormRelay>,
 
     // --- Демо-режим (тестовые маршруты фронтенда) ---
     /// `POST /api/v1/demo` и `PUT /api/v1/incidents` переписывают файл источника. По умолчанию выключены.
@@ -141,6 +143,85 @@ impl fmt::Debug for CoordinatorAccessKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("[redacted]")
     }
+}
+
+#[derive(Clone)]
+pub struct IncidentFormRelay {
+    pub endpoint: Url,
+    pub poll_interval: Duration,
+    read_token: String,
+}
+
+impl IncidentFormRelay {
+    pub fn read_token(&self) -> &str {
+        &self.read_token
+    }
+
+    fn read(reader: &mut Reader<'_>, environment: Environment) -> Option<Self> {
+        let interval_seconds = reader.number(
+            "incident_form_poll_interval_seconds",
+            3u64,
+            |v| (1..=3600).contains(v),
+            "1..=3600",
+        );
+        let raw_endpoint = reader.raw("incident_form_relay_url").unwrap_or("").trim();
+        let read_token = reader.raw("incident_form_read_token").unwrap_or("").trim();
+        if raw_endpoint.is_empty() && read_token.is_empty() {
+            return None;
+        }
+        let endpoint = Url::parse(raw_endpoint)
+            .ok()
+            .filter(|url| valid_relay_endpoint(url, environment));
+        if endpoint.is_none() {
+            reader.problem(
+                "INCIDENT_FORM_RELAY_URL",
+                "expected an HTTPS URL ending in /v1/submissions, without credentials, query or fragment"
+                    .into(),
+            );
+        }
+        if read_token.is_empty()
+            || !read_token
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte))
+        {
+            reader.problem(
+                "INCIDENT_FORM_READ_TOKEN",
+                "expected a nonempty relay read token".into(),
+            );
+        }
+        endpoint.map(|endpoint| Self {
+            endpoint,
+            poll_interval: Duration::from_secs(interval_seconds),
+            read_token: read_token.to_owned(),
+        })
+    }
+}
+
+impl fmt::Debug for IncidentFormRelay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IncidentFormRelay")
+            .field("endpoint", &self.endpoint)
+            .field("poll_interval", &self.poll_interval)
+            .field("read_token", &"[redacted]")
+            .finish()
+    }
+}
+
+fn valid_relay_endpoint(url: &Url, environment: Environment) -> bool {
+    let loopback = match url.host() {
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    };
+    let allowed_scheme =
+        url.scheme() == "https" || (environment == Environment::Test && url.scheme() == "http" && loopback);
+    allowed_scheme
+        && url.host().is_some()
+        && url.path() == "/v1/submissions"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
 }
 
 impl Settings {
@@ -324,6 +405,7 @@ impl Settings {
             })
         };
 
+        let incident_form_relay = IncidentFormRelay::read(&mut r, environment);
         let settings = Settings {
             app_name: r.string("app_name", "MTS Incident Coordinator Dashboard"),
             environment,
@@ -346,6 +428,7 @@ impl Settings {
             import_stable_read_delay: r.seconds("import_stable_read_delay_seconds", 0.05, true),
             source_naive_timezone,
             importer_embedded: r.boolean("importer_embedded", false),
+            incident_form_relay,
             demo_api_enabled: r.boolean("demo_api_enabled", false),
             demo_seed_path: vars
                 .get("demo_seed_path")
@@ -530,6 +613,52 @@ mod tests {
         let mut v = base();
         v.extend_from_slice(extra);
         Settings::from_vars(v)
+    }
+
+    #[test]
+    fn incident_form_relay_requires_an_https_endpoint_and_read_token() {
+        const ENDPOINT: &str = "INCIDENT_FORM_RELAY_URL";
+        const TOKEN: &str = "INCIDENT_FORM_READ_TOKEN";
+        const SECRET: &str = "fake_forms_secret";
+
+        assert!(with(&[]).unwrap().incident_form_relay.is_none());
+        assert!(with(&[(ENDPOINT, "https://192.0.2.1/v1/submissions")]).is_err());
+        let relay = with(&[(ENDPOINT, "https://192.0.2.1/v1/submissions"), (TOKEN, SECRET)])
+            .unwrap()
+            .incident_form_relay
+            .unwrap();
+        assert_eq!(relay.poll_interval, Duration::from_secs(3));
+        assert_eq!(relay.read_token(), SECRET);
+        assert!(!format!("{relay:?}").contains(SECRET));
+
+        for url in [
+            "https://192.0.2.1/wrong-path",
+            "https://user:password@192.0.2.1/v1/submissions",
+            "https://192.0.2.1/v1/submissions?after=99",
+            "http://127.0.0.1/v1/submissions",
+        ] {
+            let error = with(&[(ENDPOINT, url), (TOKEN, SECRET)]).unwrap_err();
+            assert!(error.to_string().contains(ENDPOINT));
+            assert!(!error.to_string().contains(SECRET));
+        }
+
+        let test_environment = ("ENVIRONMENT", "test");
+        assert!(
+            with(&[
+                test_environment,
+                (ENDPOINT, "http://127.0.0.1/v1/submissions"),
+                (TOKEN, SECRET)
+            ])
+            .is_ok()
+        );
+        assert!(
+            with(&[
+                test_environment,
+                (ENDPOINT, "http://192.0.2.1/v1/submissions"),
+                (TOKEN, SECRET)
+            ])
+            .is_err()
+        );
     }
 
     #[test]
