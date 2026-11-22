@@ -373,6 +373,68 @@ async fn incident_list_bad_params() {
 }
 
 #[tokio::test]
+async fn rules_brief_tracks_this_incidents_actions_and_current_outcome() {
+    let mut api = api!();
+    let mut recs = records();
+    recs.truncate(2);
+    update(
+        &mut recs[0],
+        &[
+            ("shortDescription", s("  ")),
+            ("description", s("Очередь чеков остановилась")),
+            ("stateEnum", s("Research")),
+            ("stateId", json!(20)),
+            ("solution", s("Перезапустили очередь")),
+            ("assignedGroupName", s("")),
+        ],
+    );
+    api.imported(&recs).await;
+    let path = format!("/incidents/{}/analysis", recs[0]["sysId"].as_str().unwrap());
+    let summary = api.json(&path).await["summary"].as_str().unwrap().to_owned();
+    assert_eq!(
+        summary,
+        "Очередь чеков остановилась. В поле решения указано «Перезапустили очередь». Идёт исследование причин."
+    );
+
+    update(
+        &mut recs[0],
+        &[("stateEnum", s("WorkInProgress")), ("stateId", json!(2))],
+    );
+    update(&mut recs[1], &[("assignedGroupName", s("Другая команда"))]);
+    api.imported(&recs).await;
+    let analysis = api.json(&path).await;
+    assert_eq!(analysis["provider"], "rules");
+    assert_eq!(
+        analysis["summary"],
+        "Очередь чеков остановилась. В поле решения указано «Перезапустили очередь». Инцидент снова в работе, результат пока не подтверждён."
+    );
+
+    update(&mut recs[0], &[("solution", s(""))]);
+    api.imported(&recs).await;
+    let analysis = api.json(&path).await;
+    assert_eq!(
+        analysis["summary"],
+        "Очередь чеков остановилась. Ранее в карточке указали «Перезапустили очередь». Инцидент снова в работе, результат пока не подтверждён."
+    );
+
+    update(
+        &mut recs[0],
+        &[
+            ("stateEnum", s("Closed")),
+            ("stateId", json!(10)),
+            ("solution", s("Обновили обработчик")),
+        ],
+    );
+    api.imported(&recs).await;
+    let analysis = api.json(&path).await;
+    assert_eq!(
+        analysis["summary"],
+        "Очередь чеков остановилась. В поле решения указано «Обновили обработчик». Инцидент закрыт."
+    );
+    api.finish().await;
+}
+
+#[tokio::test]
 async fn web_queue_filters_before_paging_and_analysis_uses_completed_evidence() {
     let mut api = api!();
     let mut recs = records();

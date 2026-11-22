@@ -259,6 +259,114 @@ async fn import_enqueues_once_per_content_and_api_serves_llm_summary() {
 }
 
 #[tokio::test]
+async fn brief_tracks_solution_edits_and_reopening_with_the_previous_repair_in_history() {
+    let Some(mut ctx) = Ctx::new(&[]).await else {
+        return;
+    };
+    let id = "INC000000008020";
+    let first_repair = "Перезапустили сервис печати.";
+    let verified_repair = "Перезапустили сервис и проверили печать на трёх кассах.";
+    ctx.recs = vec![
+        serde_json::from_value(json!({
+            "id": id, "sysId": id, "header": "Не печатаются чеки",
+            "priorityId": 2, "submitDate": "2026-11-10T10:00:00Z",
+            "stateEnum": "Resolved", "solution": first_repair,
+            "assignedGroupName": "Поддержка касс"
+        }))
+        .unwrap(),
+    ];
+    ctx.reimport().await;
+    ctx.only(id).await;
+    let resolved_brief = "Чеки не печатались. После перезапуска инцидент перевели в завершённые.";
+    ctx.llm.set(Reply::Content(
+        json!({"summary": resolved_brief, "team": null}).to_string(),
+    ));
+    assert_eq!(ctx.process().await, Some(Outcome::Completed));
+    assert_eq!(ctx.analysis(id).await["summary"], resolved_brief);
+
+    // An edit to the repair alone invalidates the previous brief before the worker runs.
+    update(&mut ctx.recs[0], &[("solution", json!(verified_repair))]);
+    ctx.reimport().await;
+    let pending = ctx.analysis(id).await;
+    assert_eq!(pending["provider"], "rules");
+    assert_eq!(pending["summaryPending"], true);
+    assert_ne!(pending["summary"], resolved_brief);
+    assert!(pending["summary"].as_str().unwrap().contains("проверили печать"));
+    ctx.only(id).await;
+    assert_eq!(ctx.process().await, Some(Outcome::Completed));
+
+    // Reopening keeps the old repair text in the source card. The new status and
+    // history must reach the model even though the description and solution are unchanged.
+    update(&mut ctx.recs[0], &[("stateEnum", json!("WorkInProgress"))]);
+    ctx.reimport().await;
+    let pending = ctx.analysis(id).await;
+    assert_eq!(pending["provider"], "rules");
+    assert_eq!(pending["summaryPending"], true);
+    assert_ne!(pending["summary"], resolved_brief);
+    assert!(pending["summary"].as_str().unwrap().contains("проверили печать"));
+    let reopened_brief = "После перезапуска проверили печать на трёх кассах. Инцидент снова в работе.";
+    ctx.llm.set(Reply::Content(
+        json!({"summary": reopened_brief, "team": null}).to_string(),
+    ));
+    ctx.only(id).await;
+    assert_eq!(ctx.process().await, Some(Outcome::Completed));
+    let request = ctx.llm.last.lock().unwrap().clone().unwrap();
+    let input: Value = serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(input["state"], "WorkInProgress");
+    assert_eq!(input["solution"], verified_repair);
+    let history = input["history"].as_array().unwrap();
+    assert!(history.iter().any(|event| event["solution"] == verified_repair));
+    assert_eq!(history.last().unwrap()["reopened"], true);
+    let ready = ctx.analysis(id).await;
+    assert_eq!(ready["provider"], "llm");
+    assert_ne!(ready["summaryPending"], true);
+    assert_eq!(ready["summary"], reopened_brief);
+    assert_eq!(ctx.worker.backfill().await.unwrap(), 0);
+    ctx.finish().await;
+}
+
+#[tokio::test]
+async fn manual_transfer_enqueues_a_new_brief_in_the_assignment_transaction() {
+    let Some(mut ctx) = Ctx::new(&[]).await else {
+        return;
+    };
+    let id = ctx.recs[0]["id"].as_str().unwrap().to_owned();
+    let key = ctx.recs[0]["sysId"].as_str().unwrap().to_owned();
+    let team = ctx
+        .recs
+        .iter()
+        .filter_map(|row| row["assignedGroupName"].as_str())
+        .find(|team| {
+            !team.trim().is_empty() && *team != "AutoClosedMi" && *team != ctx.recs[0]["assignedGroupName"]
+        })
+        .unwrap()
+        .to_owned();
+    ctx.only(&id).await;
+    assert_eq!(ctx.process().await, Some(Outcome::Completed));
+    let before = ctx.analysis(&id).await;
+    let assignment = Request::post(format!("/api/v1/incidents/{key}/assignment"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"team": team, "expectedRevision": before["revision"]}).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        ctx.app.clone().oneshot(assignment).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let after = ctx.analysis(&id).await;
+    assert_eq!(after["summaryPending"], true);
+    assert_ne!(after["summary"], before["summary"]);
+    ctx.only(&id).await;
+    assert_eq!(ctx.process().await, Some(Outcome::Completed));
+    let request = ctx.llm.last.lock().unwrap().clone().unwrap();
+    let input: Value = serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(input["team"], team);
+    assert_eq!(input["history"].as_array().unwrap().last().unwrap()["team"], team);
+    ctx.finish().await;
+}
+
+#[tokio::test]
 async fn disabled_integration_does_not_enqueue_or_serve() {
     let Some(env) = Env::with_vars(&[]).await else {
         return;
@@ -349,7 +457,9 @@ async fn transient_errors_retry_then_fail_and_api_falls_back_to_rules() {
             .await,
         1
     );
-    assert_eq!(ctx.analysis(&first).await["provider"], "rules");
+    let failed = ctx.analysis(&first).await;
+    assert_eq!(failed["provider"], "rules");
+    assert_ne!(failed["summaryPending"], true);
 
     // Обрыв по лимиту токенов и 4xx не повторяются.
     let second = ctx.recs[1]["id"].as_str().unwrap().to_owned();

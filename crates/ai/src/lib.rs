@@ -185,6 +185,7 @@ impl Worker {
         }
         let rows = read_repo::present_incidents(&mut tx).await?;
         let teams = analysis_repo::team_names(&mut tx).await?;
+        let history = analysis_repo::summary_history(&mut tx, job.incident_pk).await?;
         tx.rollback().await?;
         let Some(item) = rows.iter().find(|r| r.pk == job.incident_pk) else {
             return self.finish_failed(job, OBSOLETE, None, Outcome::Obsolete).await;
@@ -206,6 +207,7 @@ impl Worker {
         let body = chat_request(
             &self.settings.llm_model,
             &input,
+            &history,
             &candidates,
             self.settings.llm_max_tokens,
             usize::try_from(self.settings.llm_input_max_chars).unwrap_or(usize::MAX),

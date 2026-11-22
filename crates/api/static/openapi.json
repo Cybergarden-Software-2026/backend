@@ -4080,7 +4080,11 @@
           },
           "summary": {
             "type": "string",
-            "description": "Incident summary. A model-generated summary is identified in the text when the response retains rules-based team candidates."
+            "description": "Short account of the reported problem, documented actions and current outcome, based on the incident and its recent history. The rules provide this summary while the model is unavailable or still processing. A model-generated summary is identified in the text when the response retains rules-based team candidates."
+          },
+          "summaryPending": {
+            "type": "boolean",
+            "description": "True when a current summary job is queued or running. Clients may refresh the analysis while this flag is true. Absence is equivalent to false."
           },
           "facts": {
             "type": "array",
