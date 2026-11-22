@@ -176,7 +176,7 @@ GitHub Actions проверяет PR в `main` и push в `main`. На серв�
   git -C "$repo" fetch origin
   files=$(mktemp -d)
   trap 'rm -rf -- "$files"' EXIT
-  git -C "$repo" archive origin/main deploy docker-compose.yml compose.vserver.yml |
+  git -C "$repo" archive origin/main deploy docker-compose.yml compose.vserver.yml compose.firebase.yml |
     tar -xf - -C "$files"
   sudo "$files/deploy/install-backend-deploy.sh"
   sudo systemctl start underctrl-backend-deploy.service
