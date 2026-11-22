@@ -527,12 +527,15 @@ async fn assignments_are_atomic_and_reconciled_with_subsequent_imports() {
     let closed = recs[2]["sysId"].as_str().unwrap();
     let teams = api.json("/teams").await;
     assert_eq!(teams["revision"], 1);
-    assert_eq!(
-        teams["items"],
-        json!([
-            {"name":"Duty","activeCount":1}, {"name":"Team A","activeCount":1}, {"name":"Team B","activeCount":0}
-        ])
-    );
+    let items = teams["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    for (item, (name, count)) in items.iter().zip([("Duty", 1), ("Team A", 1), ("Team B", 0)]) {
+        assert_eq!(item["name"], name);
+        assert_eq!(item["activeCount"], count);
+        assert_eq!(item["phoneIsTest"], true);
+        assert!(item["phone"].as_str().unwrap().starts_with("+7819"));
+    }
+    let duty_phone = items[0]["phone"].clone();
     assert_eq!(api.assign(closed, "Team A", 1).await.status, 409);
     assert_eq!(api.assign(&id, "Unknown", 1).await.status, 400);
     assert_eq!(api.assign("missing", "Team B", 1).await.status, 404);
@@ -610,8 +613,16 @@ async fn assignments_are_atomic_and_reconciled_with_subsequent_imports() {
     let teams = api.json("/teams").await;
     assert_eq!(teams["revision"], snapshot["revision"]);
     let items = teams["items"].as_array().unwrap();
-    assert!(items.contains(&json!({"name":"Duty","activeCount":0})));
-    assert!(items.contains(&json!({"name":"External","activeCount":1})));
+    assert!(
+        items
+            .iter()
+            .any(|item| item["name"] == "Duty" && item["activeCount"] == 0 && item["phone"] == duty_phone)
+    );
+    assert!(
+        items.iter().any(|item| item["name"] == "External"
+            && item["activeCount"] == 1
+            && item["phoneIsTest"] == true)
+    );
     api.finish().await;
 }
 

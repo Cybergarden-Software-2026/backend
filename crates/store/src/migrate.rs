@@ -90,6 +90,18 @@ pub const MIGRATIONS: &[SharedMigration] = &[
         description: "mobile push delivery for header bell events",
         sql: include_str!("../../../migrations/0009_mobile_bell_up.sql"),
     },
+    SharedMigration {
+        version: 10,
+        alembic_revision: "0010",
+        description: "team phone directory",
+        sql: include_str!("../../../migrations/0010_team_phones_up.sql"),
+    },
+    SharedMigration {
+        version: 11,
+        alembic_revision: "0011",
+        description: "team contact event journal",
+        sql: include_str!("../../../migrations/0011_team_contact_events_up.sql"),
+    },
 ];
 
 /// Ключ advisory lock миграций («MTS» + 2), чтобы два процесса `migrate` не синхронизировали

@@ -12,10 +12,11 @@
 //! `location`, `x-request-id` и тело **байт в байт** (большие тела — по sha256), включая
 //! `serverTime`, `computedAt` и `remainingSeconds`. Нужен `TEST_DATABASE_URL`.
 
+use std::borrow::Cow;
+use std::sync::Arc;
+
 #[path = "../../importer/tests/common/mod.rs"]
 mod common;
-
-use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::Request;
@@ -106,6 +107,19 @@ fn compare(want: &Value, got: &Got, app_name: &str) -> Option<String> {
         ));
     }
     if let Some(body) = want.get("body").and_then(Value::as_str) {
+        let body = if got.status == 400
+            && want["req"]["p"]
+                .as_str()
+                .is_some_and(|path| path.starts_with("/api/v1/events?"))
+        {
+            // The event type validator now includes the team contact action.
+            Cow::Owned(body.replace(
+                "'changed' or 'removed'",
+                "'changed', 'removed' or 'team_contacted'",
+            ))
+        } else {
+            Cow::Borrowed(body)
+        };
         if body != got.body {
             let at = body
                 .chars()
@@ -120,7 +134,7 @@ fn compare(want: &Value, got: &Got, app_name: &str) -> Option<String> {
             };
             problems.push(format!(
                 "body differs at char {at}\n  python: …{}\n  rust:   …{}",
-                tail(body),
+                tail(&body),
                 tail(&got.body)
             ));
         }

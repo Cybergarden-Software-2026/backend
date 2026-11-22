@@ -24,6 +24,8 @@ struct Incident {
     normalized_state: NormalizedState,
     priority_id: i16,
     assigned_group_name: Option<String>,
+    team_phone: Option<String>,
+    team_phone_is_test: bool,
     submit_date: String,
     deadline: Option<String>,
     last_assignment_to_team_date_time: Option<String>,
@@ -43,9 +45,13 @@ pub(crate) async fn list(State(state): State<AppState>) -> ApiResult<Json<Incide
     })?;
     let now = (state.clock)();
     let items = sqlx::query(
-        "SELECT sys_id, id, header, normalized_state, priority_id, raw ->> 'assignedGroupName' AS team,
-                submit_date, deadline, last_assignment_to_team_at
-         FROM incidents WHERE is_present ORDER BY id, sys_id",
+        "SELECT i.sys_id, i.id, i.header, i.normalized_state, i.priority_id,
+                i.raw ->> 'assignedGroupName' AS team,
+                i.submit_date, i.deadline, i.last_assignment_to_team_at,
+                coalesce(t.phone, team_demo_phone(t.name)) AS team_phone,
+                t.name IS NOT NULL AND t.phone IS NULL AS team_phone_is_test
+         FROM incidents i LEFT JOIN teams t ON t.name = i.assigned_group_name
+         WHERE i.is_present ORDER BY i.id, i.sys_id",
     )
     .try_map(|row: PgRow| {
         let state: NormalizedState =
@@ -79,6 +85,8 @@ pub(crate) async fn list(State(state): State<AppState>) -> ApiResult<Json<Incide
             normalized_state: state,
             priority_id: priority,
             assigned_group_name: team,
+            team_phone: row.try_get("team_phone")?,
+            team_phone_is_test: row.try_get("team_phone_is_test")?,
             submit_date: utc_millis(submitted),
             deadline: deadline.map(utc_millis),
             last_assignment_to_team_date_time: assignment.map(utc_millis),

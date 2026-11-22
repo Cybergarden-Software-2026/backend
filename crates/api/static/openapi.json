@@ -2051,6 +2051,111 @@
         }
       }
     },
+    "/api/v1/mobile/incidents/{sysId}/team-contact": {
+      "post": {
+        "tags": [
+          "Mobile account"
+        ],
+        "operationId": "record_mobile_team_contact",
+        "summary": "Record confirmed contact with the assigned team",
+        "description": "Adds a team_contacted event to the incident history and dashboard event journal. It records the authenticated coordinator and server time. Retry the same team and requestId to retrieve the original event.",
+        "security": [
+          {
+            "MobileSessionBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "sysId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "UTF-8 JSON request body, maximum 8192 bytes.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MobileTeamContactRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "An earlier request by the same coordinator recorded this contact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeEventView"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Contact recorded and added to the event journal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeEventView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/MobileValidation"
+          },
+          "401": {
+            "$ref": "#/components/responses/MobileSessionUnauthorized"
+          },
+          "404": {
+            "description": "The incident is absent from the current snapshot (INCIDENT_NOT_FOUND).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The assignment changed (TEAM_CONTACT_ASSIGNMENT_CHANGED), a resolution team is required (TEAM_CONTACT_UNAVAILABLE), or the requestId was already used with a different team (TEAM_CONTACT_REQUEST_CONFLICT).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "$ref": "#/components/responses/MobilePayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/MobileJsonRequired"
+          },
+          "500": {
+            "$ref": "#/components/responses/MobileInternalError"
+          },
+          "503": {
+            "description": "Personal accounts are disabled (MOBILE_ACCOUNTS_DISABLED), or the first source snapshot has not been accepted (SOURCE_NOT_READY).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/mobile/notifications": {
       "get": {
         "tags": [
@@ -2225,6 +2330,7 @@
           "deadline",
           "team",
           "priority",
+          "team_contacted",
           "changed",
           "removed"
         ],
@@ -2310,6 +2416,9 @@
           "incidentRevision": {
             "type": "integer",
             "title": "Incidentrevision"
+          },
+          "contact": {
+            "$ref": "#/components/schemas/TeamContact"
           }
         },
         "type": "object",
@@ -4212,11 +4321,24 @@
                 "activeCount": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "phone": {
+                  "type": "string",
+                  "description": "Configured team number or a stable generated example number in international format.",
+                  "examples": [
+                    "+78194527638"
+                  ]
+                },
+                "phoneIsTest": {
+                  "type": "boolean",
+                  "description": "True for a generated example number. Only configured numbers are intended for dialing."
                 }
               },
               "required": [
                 "name",
-                "activeCount"
+                "activeCount",
+                "phone",
+                "phoneIsTest"
               ]
             }
           },
@@ -4846,6 +4968,51 @@
           }
         }
       },
+      "TeamContact": {
+        "type": "object",
+        "description": "Details present on team_contacted journal events.",
+        "properties": {
+          "team": {
+            "type": "string"
+          },
+          "actorLogin": {
+            "type": "string"
+          },
+          "actorDisplayName": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "team",
+          "actorLogin",
+          "actorDisplayName",
+          "requestId"
+        ]
+      },
+      "MobileTeamContactRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "team": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The displayed assignedGroupName when contact was confirmed."
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Generate a UUID for each confirmation and reuse it for retries. It is scoped to the coordinator and incident."
+          }
+        },
+        "required": [
+          "team",
+          "requestId"
+        ]
+      },
       "MobileCurrentIncident": {
         "type": "object",
         "properties": {
@@ -4872,6 +5039,17 @@
               "string",
               "null"
             ]
+          },
+          "teamPhone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Team directory phone when the incident has a matching directory entry."
+          },
+          "teamPhoneIsTest": {
+            "type": "boolean",
+            "description": "True for a generated example number. False when there is a configured phone or no team phone."
           },
           "submitDate": {
             "type": "string",
@@ -4915,6 +5093,8 @@
           "normalizedState",
           "priorityId",
           "assignedGroupName",
+          "teamPhone",
+          "teamPhoneIsTest",
           "submitDate",
           "deadline",
           "lastAssignmentToTeamDateTime",

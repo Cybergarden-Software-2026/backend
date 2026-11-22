@@ -292,6 +292,7 @@ fn change_event_view_shape() {
         at: now(),
         previous: None,
         current: Some(json!({"id": "INC1"})),
+        contact: None,
     };
     let view = change_event_view(&ce);
     assert_eq!(view["eventId"], 105);

@@ -218,6 +218,7 @@ async fn mobile_contract_distinguishes_session_and_push_bearers() {
         ("get", "session", &session, "200"),
         ("delete", "session", &session, "204"),
         ("get", "incidents", &session, "200"),
+        ("post", "incidents/{sysId}/team-contact", &session, "201"),
         ("get", "notifications", &session, "200"),
         ("put", "notifications/{notification_id}/read", &session, "204"),
         ("get", "devices", &owner, "200"),
