@@ -4,7 +4,9 @@ use std::collections::HashSet;
 
 use axum::extract::{OriginalUri, State};
 use chrono::{DateTime, Utc};
-use dashboard_domain::analysis::{TeamCandidate, candidate_teams};
+use dashboard_domain::analysis::{
+    CandidateEvidence, TeamCandidate, candidate_teams, needs_coordinator_routing,
+};
 use dashboard_domain::constants::NormalizedState;
 use dashboard_domain::projection::{IncidentRow, format_utc};
 use dashboard_store::analysis_repo::{self, JobSpec};
@@ -19,6 +21,8 @@ use crate::web_queue::{sla_kind, state_of};
 
 const RULES_REASON: &str = "Команда встречается в завершённых записях того же сервиса или сценария продукта. Совпадение не подтверждает зону ответственности.";
 const LLM_REASON: &str = "Модель выбрала команду среди кандидатов по завершённым записям того же сервиса или сценария продукта. Совпадение не подтверждает зону ответственности.";
+const ACTIVE_RULES_REASON: &str = "Команда сейчас работает с похожими инцидентами того же сервиса или сценария продукта. Проверьте её зону ответственности перед назначением.";
+const ACTIVE_LLM_REASON: &str = "Модель предложила команду, которая сейчас работает с похожими инцидентами. Проверьте её зону ответственности перед назначением.";
 
 pub async fn get(State(state): State<AppState>, OriginalUri(uri): OriginalUri) -> ApiResult<PyJson> {
     let mut params = Params::new(&uri);
@@ -32,36 +36,56 @@ pub async fn get(State(state): State<AppState>, OriginalUri(uri): OriginalUri) -
         .find(|row| row.sys_id == key)
         .or_else(|| loaded.rows.iter().find(|row| row.id == key))
         .ok_or_else(incident_not_found)?;
+    let coordinator_group = &state.settings.coordinator_group_name;
+    let coordinator_routing = needs_coordinator_routing(item, coordinator_group);
+    let mut candidates = candidate_teams(item, &loaded.rows, coordinator_group);
+    if !candidates.is_empty() {
+        let teams: HashSet<_> = analysis_repo::team_names(&mut loaded.tx)
+            .await?
+            .into_iter()
+            .collect();
+        candidates.retain(|candidate| teams.contains(candidate.team));
+    }
     let mut analysis = analyze(
         item,
-        &loaded.rows,
         loaded.revision,
         (state.clock)(),
-        &state.settings.coordinator_group_name,
+        coordinator_routing,
+        &candidates,
     );
     if state.settings.llm_enabled {
         let spec = JobSpec::summary(&state.settings);
         if let Some(stored) = analysis_repo::current_result(&mut loaded.tx, &spec, item.pk).await? {
-            let teams: HashSet<String> = analysis_repo::team_names(&mut loaded.tx)
-                .await?
-                .into_iter()
-                .collect();
-            let rules = candidate_teams(item, &loaded.rows, &state.settings.coordinator_group_name);
-            apply_llm(&mut analysis, &stored.result, stored.finished_at, &rules, &teams);
+            apply_llm(
+                &mut analysis,
+                &stored.result,
+                stored.finished_at,
+                &candidates,
+                coordinator_routing,
+            );
         }
     }
     Ok(PyJson(analysis))
 }
 
-/// Заменяет выжимку и кандидатов результатом модели. Команда выдаётся, только если её выбрала
-/// модель среди переданных ей кандидатов и она до сих пор есть среди кандидатов правил и в
-/// справочнике; `evidenceIds` берутся из текущих правил. Иначе `candidates` пуст.
+fn candidate_json(candidate: &TeamCandidate<'_>, llm: bool) -> Value {
+    let reason = match (candidate.evidence, llm) {
+        (CandidateEvidence::Completed, false) => RULES_REASON,
+        (CandidateEvidence::Completed, true) => LLM_REASON,
+        (CandidateEvidence::InProgress, false) => ACTIVE_RULES_REASON,
+        (CandidateEvidence::InProgress, true) => ACTIVE_LLM_REASON,
+    };
+    json!({"team": candidate.team, "evidenceIds": candidate.evidence_ids, "reason": reason})
+}
+
+/// Рекомендацию модели сверяем со списком, который она получила, и актуальными кандидатами.
+/// Для очереди координаторов при отсутствии выбора сохраняем кандидатов правил и выжимку модели.
 fn apply_llm(
     analysis: &mut Value,
     result: &Value,
     finished_at: DateTime<Utc>,
     rules: &[TeamCandidate<'_>],
-    teams: &HashSet<String>,
+    coordinator_routing: bool,
 ) {
     let Some(summary) = result
         .get("summary")
@@ -70,27 +94,22 @@ fn apply_llm(
     else {
         return;
     };
-    let offered: Vec<&str> = result
-        .get("candidates")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+    let offered = result.get("candidates").and_then(Value::as_array);
     let chosen = result
         .get("team")
         .and_then(Value::as_str)
-        .filter(|team| offered.contains(team) && teams.contains(*team))
-        .and_then(|team| rules.iter().find(|c| c.team == team));
-    let candidates: Vec<Value> = chosen
-        .map(|c| json!({"team": c.team, "evidenceIds": c.evidence_ids, "reason": LLM_REASON}))
-        .into_iter()
-        .collect();
-    let had_rules = !rules.is_empty();
+        .filter(|team| offered.is_some_and(|list| list.iter().any(|name| name.as_str() == Some(team))))
+        .and_then(|team| rules.iter().find(|candidate| candidate.team == team));
+    analysis["generatedAt"] = json!(format_utc(&finished_at));
+    if chosen.is_none() && coordinator_routing && !rules.is_empty() {
+        analysis["summary"] = json!(format!("Разбор ИИ. {summary}"));
+        return;
+    }
     analysis["provider"] = json!("llm");
     analysis["summary"] = json!(summary);
-    analysis["generatedAt"] = json!(format_utc(&finished_at));
-    analysis["candidates"] = Value::Array(candidates);
+    analysis["candidates"] = Value::Array(chosen.map(|c| candidate_json(c, true)).into_iter().collect());
     if chosen.is_none()
-        && had_rules
+        && !rules.is_empty()
         && let Some(missing) = analysis["missing"].as_array_mut()
     {
         missing.push(json!(
@@ -101,10 +120,10 @@ fn apply_llm(
 
 fn analyze(
     item: &IncidentRow,
-    items: &[IncidentRow],
     revision: i64,
     now: DateTime<Utc>,
-    coordinator_group: &str,
+    coordinator_routing: bool,
+    candidates: &[TeamCandidate<'_>],
 ) -> Value {
     let state = state_of(item);
     let team = item.assigned_group_name.as_deref().unwrap_or_default();
@@ -112,7 +131,7 @@ fn analyze(
     if state.is_active() && item.priority_id == 4 {
         attention.push("Наивысший приоритет: необходимо оперативное внимание.");
     }
-    if state.is_attention() && team.trim() == coordinator_group {
+    if coordinator_routing {
         attention.push("Назначен координаторам: необходимо определить команду для передачи.");
     }
     match sla_kind(item, now) {
@@ -127,10 +146,6 @@ fn analyze(
     if item.is_need_up == Some(true) {
         attention.push("После устранения проблемы требуется работа с последствиями.");
     }
-    let candidates: Vec<Value> = candidate_teams(item, items, coordinator_group)
-        .into_iter()
-        .map(|c| json!({"team": c.team, "evidenceIds": c.evidence_ids, "reason": RULES_REASON}))
-        .collect();
     let mut missing = Vec::new();
     if item.deadline.is_none() {
         missing.push("Не указан срок решения.");
@@ -139,7 +154,11 @@ fn analyze(
         missing.push("Не указан персональный исполнитель.");
     }
     if candidates.is_empty() {
-        missing.push("В снимке недостаточно сопоставимых завершённых случаев для рекомендации команды.");
+        missing.push(if coordinator_routing {
+            "В снимке недостаточно похожих инцидентов для рекомендации команды."
+        } else {
+            "В снимке недостаточно сопоставимых завершённых случаев для рекомендации команды."
+        });
     }
     let summary = match (&item.short_description, &item.description) {
         (Some(short), _) if !short.is_empty() => short.clone(),
@@ -168,6 +187,6 @@ fn analyze(
         ],
         "attention": attention,
         "missing": missing,
-        "candidates": candidates,
+        "candidates": candidates.iter().map(|candidate| candidate_json(candidate, false)).collect::<Vec<_>>(),
     })
 }

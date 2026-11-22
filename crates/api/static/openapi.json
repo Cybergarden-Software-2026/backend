@@ -3548,7 +3548,8 @@
             "description": "rules: explainable rules-based analysis. llm: summary and at most one validated team candidate produced in advance by the local model for the current incident fields."
           },
           "summary": {
-            "type": "string"
+            "type": "string",
+            "description": "Incident summary. A model-generated summary is identified in the text when the response retains rules-based team candidates."
           },
           "facts": {
             "type": "array",
@@ -3575,6 +3576,7 @@
             }
           },
           "candidates": {
+            "description": "Teams with evidence from matching completed incidents. For incidents awaiting routing by coordinators, matching incidents in WorkInProgress or Research can supply evidence if no completed case matches. A model abstention in that queue retains evidenced candidates with provider rules.",
             "type": "array",
             "items": {
               "type": "object",

@@ -210,8 +210,8 @@ async fn import_enqueues_once_per_content_and_api_serves_llm_summary() {
     assert_eq!(request["chat_template_kwargs"]["enable_thinking"], false);
 
     let analysis = ctx.analysis(&first).await;
-    assert_eq!(analysis["provider"], "llm");
-    assert_eq!(analysis["summary"], "Не печатаются чеки.");
+    assert_eq!(analysis["provider"], "rules");
+    assert_eq!(analysis["summary"], "Разбор ИИ. Не печатаются чеки.");
     for field in [
         "sysId",
         "revision",
@@ -232,7 +232,10 @@ async fn import_enqueues_once_per_content_and_api_serves_llm_summary() {
     // Правка другого инцидента не инвалидирует выжимку.
     update(&mut ctx.recs[1], &[("description", json!("Другое описание"))]);
     ctx.reimport().await;
-    assert_eq!(ctx.analysis(&first).await["provider"], "llm");
+    assert_eq!(
+        ctx.analysis(&first).await["summary"],
+        "Разбор ИИ. Не печатаются чеки."
+    );
     assert_eq!(ctx.scalar("SELECT count(*) FROM analysis_jobs").await, total + 1);
 
     // Правка описания этой карточки: старая выжимка сразу не выдаётся, ставится новая задача.
@@ -248,7 +251,10 @@ async fn import_enqueues_once_per_content_and_api_serves_llm_summary() {
         r#"{"summary":"Обновлённая выжимка.","team":null}"#.into(),
     ));
     assert_eq!(ctx.process().await, Some(Outcome::Completed));
-    assert_eq!(ctx.analysis(&first).await["summary"], "Обновлённая выжимка.");
+    assert_eq!(
+        ctx.analysis(&first).await["summary"],
+        "Разбор ИИ. Обновлённая выжимка."
+    );
     ctx.finish().await;
 }
 
@@ -394,7 +400,7 @@ async fn late_answer_does_not_overwrite_newer_attempt() {
             .unwrap()
     );
     drop(conn);
-    assert_eq!(ctx.analysis(&first).await["summary"], "Новый ответ.");
+    assert_eq!(ctx.analysis(&first).await["summary"], "Разбор ИИ. Новый ответ.");
 
     // Истёкшая аренда на последней попытке завершает задачу.
     let second = ctx.recs[1]["id"].as_str().unwrap().to_owned();
@@ -501,14 +507,125 @@ async fn team_is_offered_only_from_rule_candidates() {
 }
 
 #[tokio::test]
+async fn coordinator_analysis_uses_matching_active_evidence_and_falls_back_to_rules() {
+    let Some(mut ctx) = Ctx::new(&[]).await else {
+        return;
+    };
+    let coordinator = ctx.env.settings.coordinator_group_name.clone();
+    let target = "INC000000008001";
+    let active = "INC000000008002";
+    let team = "Техническая команда";
+    let record = |id: &str, day: u8, state: &str, group: &str| {
+        serde_json::from_value::<Record>(json!({
+            "id": id,
+            "sysId": id,
+            "header": "Сбой доставки",
+            "submitDate": format!("2026-11-{day:02}T12:00:00Z"),
+            "priorityId": 3,
+            "stateEnum": state,
+            "assignedGroupName": group,
+            "service": "Доставка",
+            "productName": "Заказы",
+            "scenarioName": "Отправка"
+        }))
+        .unwrap()
+    };
+    ctx.recs = vec![
+        record(target, 10, "Assigned", &coordinator),
+        record(active, 12, "WorkInProgress", team),
+        record("INC000000008003", 14, "Assigned", "В очереди команды"),
+        record("INC000000008004", 16, "WorkInProgress", "AutoClosedMi"),
+    ];
+    ctx.reimport().await;
+
+    ctx.llm.set(Reply::Content(
+        json!({"summary": "Сбой доставки.", "team": team}).to_string(),
+    ));
+    ctx.only(target).await;
+    assert_eq!(ctx.process().await, Some(Outcome::Completed));
+    let request = ctx.llm.last.lock().unwrap().clone().unwrap();
+    let user: Value = serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(user["candidates"], json!([team]));
+
+    let analysis = ctx.analysis(target).await;
+    assert_eq!(analysis["provider"], "llm");
+    assert_eq!(analysis["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(analysis["candidates"][0]["team"], team);
+    assert_eq!(analysis["candidates"][0]["evidenceIds"], json!([active]));
+
+    for (description, choice) in [
+        ("Не проходит оформление доставки.", Value::Null),
+        ("Закрывается форма доставки.", json!("Выдуманная команда")),
+    ] {
+        // Новое описание ставит в очередь свежий запрос к модели.
+        update(&mut ctx.recs[0], &[("description", json!(description))]);
+        ctx.reimport().await;
+        ctx.llm.set(Reply::Content(
+            json!({"summary": "Сбой доставки.", "team": choice}).to_string(),
+        ));
+        ctx.only(target).await;
+        assert_eq!(ctx.process().await, Some(Outcome::Completed));
+        let fallback = ctx.analysis(target).await;
+        assert_eq!(fallback["provider"], "rules");
+        assert_eq!(fallback["summary"], "Разбор ИИ. Сбой доставки.");
+        assert_eq!(fallback["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(fallback["candidates"][0]["team"], team);
+        assert_eq!(fallback["candidates"][0]["evidenceIds"], json!([active]));
+    }
+
+    // Совпадения продукта со сценарием достаточно и во время исследования причин.
+    update(
+        &mut ctx.recs[1],
+        &[
+            ("service", json!("Другой сервис")),
+            ("stateEnum", json!("Research")),
+        ],
+    );
+    ctx.reimport().await;
+    let analysis = ctx.analysis(target).await;
+    assert_eq!(analysis["candidates"][0]["evidenceIds"], json!([active]));
+
+    let completed = "INC000000008005";
+    let mut resolved = record(completed, 18, "Resolved", "Команда из истории");
+    update(
+        &mut resolved,
+        &[("completionDate", json!("2026-11-18T13:00:00Z"))],
+    );
+    ctx.recs.push(resolved);
+    ctx.reimport().await;
+    let analysis = ctx.analysis(target).await;
+    assert_eq!(analysis["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(analysis["candidates"][0]["evidenceIds"], json!([completed]));
+    ctx.recs.pop();
+
+    // Продукт без совпавшего сценария не даёт оснований. В снимке остаются
+    // исключённые команды, в том числе другая карточка координаторов в работе.
+    update(&mut ctx.recs[1], &[("scenarioName", json!("Другой сценарий"))]);
+    update(
+        &mut ctx.recs[2],
+        &[
+            ("stateEnum", json!("WorkInProgress")),
+            ("assignedGroupName", json!(coordinator)),
+        ],
+    );
+    ctx.reimport().await;
+    assert_eq!(ctx.analysis(target).await["candidates"], json!([]));
+    ctx.finish().await;
+}
+
+#[tokio::test]
 async fn model_revision_change_requeues_and_old_results_are_not_served() {
     let Some(mut ctx) = Ctx::new(&[]).await else {
         return;
     };
     let first = ctx.recs[0]["id"].as_str().unwrap().to_owned();
+    let rules_summary = ctx.analysis(&first).await["summary"].clone();
     ctx.only(&first).await;
     assert_eq!(ctx.process().await, Some(Outcome::Completed));
-    assert_eq!(ctx.analysis(&first).await["provider"], "llm");
+    assert_eq!(
+        ctx.analysis(&first).await["summary"],
+        "Разбор ИИ. Не печатаются чеки."
+    );
 
     let mut vars = vec![("DATABASE_URL", ctx.env.db.url.as_str())];
     vars.extend_from_slice(LLM_VARS);
@@ -535,6 +652,7 @@ async fn model_revision_change_requeues_and_old_results_are_not_served() {
     let res = app.oneshot(req).await.unwrap();
     let body: Value = serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["provider"], "rules");
+    assert_eq!(body["summary"], rules_summary);
     ctx.finish().await;
 }
 
