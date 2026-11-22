@@ -116,6 +116,125 @@ macro_rules! api {
     };
 }
 
+#[tokio::test]
+async fn public_form_saves_once_and_the_incident_survives_an_itsm_import() {
+    let mut api = api!();
+    let root = "/incident-reports";
+    let form = api.get(&format!("{root}/form")).await;
+    assert_eq!(form.status, 200);
+    assert!(form.content_type.unwrap().starts_with("text/html"));
+    assert!(
+        String::from_utf8(form.raw)
+            .unwrap()
+            .contains("Сообщить об инциденте")
+    );
+    for asset in ["form.css", "form.js"] {
+        assert_eq!(api.get(&format!("{root}/{asset}")).await.status, 200);
+    }
+    assert_eq!(api.get(root).await.status, 405);
+
+    let request = json!({
+        "submission_id": "11111111-2222-4333-8444-555555555555",
+        "title": "  Заявка из формы  ",
+        "description": "Затронуты два подразделения",
+        "service": "Личный кабинет",
+        "priority": "P1",
+    });
+    let headers = [("Content-Type", "application/json")];
+    let mut invalid = request.clone();
+    invalid["description"] = json!(" ");
+    assert_eq!(
+        api.send("POST", root, &headers, Body::from(invalid.to_string()))
+            .await
+            .status,
+        400
+    );
+
+    let (first, second) = tokio::join!(
+        api.send("POST", root, &headers, Body::from(request.to_string())),
+        api.send("POST", root, &headers, Body::from(request.to_string()))
+    );
+    let (created, replay) = if first.status == 201 {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    assert_eq!(created.status, 201);
+    assert_eq!(replay.status, 200);
+    let created = created.json();
+    let id = created["id"].as_str().unwrap();
+    assert!(id.starts_with("INC-FORM-"));
+    assert_eq!(created["created"], true);
+    assert_eq!(replay.json(), json!({"id":id,"created":false}));
+
+    let mut changed = request;
+    changed["priority"] = json!("P4");
+    assert_eq!(
+        api.send("POST", root, &headers, Body::from(changed.to_string()))
+            .await
+            .status,
+        409
+    );
+
+    let snapshot = api.json("/snapshot?view=web").await;
+    assert_eq!(snapshot["items"].as_array().unwrap().len(), 1);
+    let item = &snapshot["items"][0];
+    assert_eq!(item["id"], id);
+    assert_eq!(item["header"], "Заявка из формы");
+    assert_eq!(item["description"], "Затронуты два подразделения");
+    assert_eq!(item["service"], "Личный кабинет");
+    assert_eq!(item["priorityId"], 4);
+    assert_eq!(item["stateEnum"], "Assigned");
+    assert!(item["dashboard"]["itsmUrl"].is_null());
+    assert_eq!(snapshot["events"].as_array().unwrap().len(), 1);
+    assert!(
+        snapshot["events"][0]["types"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("created"))
+    );
+
+    api.imported(&[]).await;
+    let snapshot = api.json("/snapshot?view=web").await;
+    assert_eq!(snapshot["items"][0]["id"], id);
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn incident_form_is_public_while_the_queue_rejects_anonymous_reads() {
+    let Some(api) = Api::with_vars(&[("COORDINATOR_ACCOUNTS_ENABLED", "true")]).await else {
+        return;
+    };
+    assert_eq!(api.get("/incident-reports/form").await.status, 200);
+    let report = api
+        .send(
+            "POST",
+            "/incident-reports",
+            &[("Content-Type", "application/json")],
+            Body::from(
+                json!({
+                    "submission_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                    "title": "Проверка доступа",
+                    "description": "Проверка отправки формы без учётки координатора",
+                    "service": "Дашборд",
+                    "priority": "P4",
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+    assert_eq!(report.status, 201);
+    assert_eq!(api.get("/incidents").await.status, 401);
+    let report = report.json();
+    assert_eq!(
+        api.get(&format!("/incidents/{}", report["id"].as_str().unwrap()))
+            .await
+            .status,
+        401
+    );
+    api.finish().await;
+}
+
 // ================================================================ до первого снимка
 
 #[tokio::test]

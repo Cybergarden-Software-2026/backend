@@ -3,7 +3,7 @@
   "info": {
     "title": "Dashboard API",
     "version": "1.0.0",
-    "description": "When coordinator access is configured, dashboard API operations require a valid coordinator session. Health, documentation and the session endpoint are public. When access is disabled, dashboard operations require no session. Mobile QR sign-in requires individual coordinator accounts. The coordinator cookie authorizes pairing codes and owner operations. Exchange the QR code and a client-generated deviceId for a mobile session bearer. The legacy push-only bearer has its own restricted operations. Set MOBILE_PUSH_ENABLED to enable FCM registration and delivery. Mobile responses specify Cache-Control: no-store."
+    "description": "When coordinator access is configured, dashboard API operations require a valid coordinator session. Health, documentation, session and incident report submission endpoints are public. When access is disabled, dashboard operations require no session. Mobile QR sign-in requires individual coordinator accounts. The coordinator cookie authorizes pairing codes and owner operations. Exchange the QR code and a client-generated deviceId for a mobile session bearer. The legacy push-only bearer has its own restricted operations. Set MOBILE_PUSH_ENABLED to enable FCM registration and delivery. Mobile responses specify Cache-Control: no-store."
   },
   "security": [
     {
@@ -11,6 +11,62 @@
     }
   ],
   "paths": {
+    "/api/v1/incident-reports/form": {
+      "get": {
+        "tags": ["incident reports"],
+        "summary": "Open the public incident form",
+        "operationId": "incident_report_form",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Incident form page",
+            "content": {"text/html": {"schema": {"type": "string"}}}
+          }
+        }
+      }
+    },
+    "/api/v1/incident-reports": {
+      "post": {
+        "tags": ["incident reports"],
+        "summary": "Submit a public incident report",
+        "operationId": "submit_incident_report",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["submission_id", "title", "description", "service", "priority"],
+                "properties": {
+                  "submission_id": {"type": "string", "format": "uuid", "description": "Canonical lowercase UUIDv4"},
+                  "title": {"type": "string", "minLength": 1, "maxLength": 160},
+                  "description": {"type": "string", "minLength": 1, "maxLength": 5000},
+                  "service": {"type": "string", "minLength": 1, "maxLength": 160},
+                  "priority": {"type": "string", "enum": ["P1", "P2", "P3", "P4"]}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The same request was already saved",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/IncidentReportReceipt"}}}
+          },
+          "201": {
+            "description": "Incident saved and visible in the coordinator queue",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/IncidentReportReceipt"}}}
+          },
+          "400": {"description": "Invalid fields or JSON"},
+          "409": {"description": "This submission ID is already in use with different fields"},
+          "413": {"description": "Request exceeds 32 KiB"},
+          "415": {"description": "Content-Type must be application/json"},
+          "429": {"description": "Submission rate limit exceeded"}
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": [
@@ -2289,6 +2345,14 @@
   },
   "components": {
     "schemas": {
+      "IncidentReportReceipt": {
+        "type": "object",
+        "required": ["id", "created"],
+        "properties": {
+          "id": {"type": "string", "example": "INC-FORM-123"},
+          "created": {"type": "boolean"}
+        }
+      },
       "ChangeEventPage": {
         "properties": {
           "items": {

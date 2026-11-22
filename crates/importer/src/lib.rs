@@ -7,5 +7,7 @@ pub mod reader;
 pub mod service;
 pub mod worker;
 
-pub use service::{ImportError, ImportOutcome, ImportService, OutcomeStatus};
+pub use service::{
+    ImportError, ImportOutcome, ImportService, NativeFormReceipt, NativeFormReport, OutcomeStatus,
+};
 pub use worker::{IMPORTER_LOCK_KEY, ImporterWorker, run_importer};
