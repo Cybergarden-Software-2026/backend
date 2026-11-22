@@ -1,0 +1,10 @@
+services:
+  api:
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/firebase-service-account
+    secrets:
+      - firebase-service-account
+
+secrets:
+  firebase-service-account:
+    file: ${FIREBASE_CREDENTIALS_FILE:-/etc/underctrl-backend-deploy/firebase-service-account.json}

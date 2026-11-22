@@ -34,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
 
     // IMPORTER_EMBEDDED=true: импортёр в том же процессе (с тем же advisory lock).
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let delivery = dashboard_api::mobile_delivery::start(&settings, pool.clone(), stop_rx.clone())?;
     let importer = settings.importer_embedded.then(|| {
         let settings = Arc::clone(&settings);
         tokio::spawn(async move {
@@ -54,6 +55,9 @@ async fn main() -> anyhow::Result<()> {
     dashboard_api::serve(listener, state, shutdown).await?;
     if let Some(task) = importer {
         let _ = task.await;
+    }
+    if let Some(task) = delivery {
+        task.await?;
     }
     pool.close().await;
     tracing::info!("API stopped");

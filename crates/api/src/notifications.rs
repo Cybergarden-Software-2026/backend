@@ -88,7 +88,8 @@ pub(crate) async fn mark_read(
 ) -> ApiResult<StatusCode> {
     let user = notification_user(coordinator, &state, &headers)?;
     let mut p = Params::new(&uri);
-    let segment = uri.path().split('/').nth(4).unwrap_or("");
+    // Both the web and mobile routes end in /{notification_id}/read.
+    let segment = uri.path().rsplit('/').nth(1).unwrap_or("");
     let id = p.path_int("notification_id", &params::decode_path_segment(segment), 1);
     p.finish()?;
 

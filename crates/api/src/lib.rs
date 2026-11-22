@@ -16,8 +16,11 @@ pub mod dashboard;
 pub mod demo;
 pub mod docs;
 pub mod error;
+mod fcm;
 pub mod health;
 mod mass_problems;
+mod mobile;
+pub mod mobile_delivery;
 pub mod notifications;
 pub mod params;
 pub mod request_id;
@@ -140,7 +143,8 @@ fn api_v1(state: AppState) -> Router<AppState> {
             "/notifications/{notification_id}/read",
             put(notifications::mark_read),
         )
-        .route_layer(from_fn_with_state(state, coordinator_session::protect))
+        .route_layer(from_fn_with_state(state.clone(), coordinator_session::protect))
+        .merge(mobile::routes(state))
         .merge(
             Router::new()
                 .route(

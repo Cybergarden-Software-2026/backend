@@ -134,7 +134,7 @@ pub async fn create_accounts(
     Ok(issued)
 }
 
-/// Disable an account and revoke all its sessions while holding the account row lock.
+/// Revoke the account's sessions, unused QR code and registered devices under the account lock.
 pub async fn disable_account(pool: &PgPool, login: &str) -> anyhow::Result<bool> {
     let login = normalized_login(login).context("invalid coordinator login")?;
     let mut tx = pool.begin().await?;
@@ -147,6 +147,14 @@ pub async fn disable_account(pool: &PgPool, login: &str) -> anyhow::Result<bool>
     .rows_affected()
         == 1;
     if disabled {
+        sqlx::query("DELETE FROM mobile_pairings WHERE account_login = $1")
+            .bind(&login)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM mobile_devices WHERE account_login = $1")
+            .bind(&login)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM coordinator_sessions WHERE account_login = $1")
             .bind(login)
             .execute(&mut *tx)

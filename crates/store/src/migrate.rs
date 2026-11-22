@@ -72,6 +72,18 @@ pub const MIGRATIONS: &[SharedMigration] = &[
         description: "individual coordinator accounts",
         sql: include_str!("../../../migrations/0006_coordinator_accounts_up.sql"),
     },
+    SharedMigration {
+        version: 7,
+        alembic_revision: "0007",
+        description: "mobile device pairing and critical push queue",
+        sql: include_str!("../../../migrations/0007_mobile_push_up.sql"),
+    },
+    SharedMigration {
+        version: 8,
+        alembic_revision: "0008",
+        description: "mobile account sessions by installation id",
+        sql: include_str!("../../../migrations/0008_mobile_sessions_up.sql"),
+    },
 ];
 
 /// Ключ advisory lock миграций («MTS» + 2), чтобы два процесса `migrate` не синхронизировали

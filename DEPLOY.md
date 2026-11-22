@@ -176,7 +176,7 @@ GitHub Actions проверяет PR в `main` и push в `main`. На серв�
   git -C "$repo" fetch origin
   files=$(mktemp -d)
   trap 'rm -rf -- "$files"' EXIT
-  git -C "$repo" archive origin/main deploy docker-compose.yml compose.vserver.yml |
+  git -C "$repo" archive origin/main deploy docker-compose.yml compose.vserver.yml compose.firebase.yml |
     tar -xf - -C "$files"
   sudo "$files/deploy/install-backend-deploy.sh"
   sudo systemctl start underctrl-backend-deploy.service
@@ -265,3 +265,15 @@ sudo docker compose -p mts-incident-dashboard exec -T db sh -c \
 
 Локально и в CI `LLM_ENABLED=false`: worker простаивает, тесты используют
 имитацию модели и не обращаются к vserver.
+
+## Мобильные push-уведомления через Firebase
+
+Проект — `underctrl-d087a`. Отправитель работает внутри процесса `api` и забирает из PostgreSQL новые события `critical.raised`. Исходящие HTTPS-соединения нужны к `oauth2.googleapis.com` и `fcm.googleapis.com`. По умолчанию `MOBILE_PUSH_ENABLED=false`. Обычный `migrate` применяет миграции `0007` для доставки и `0008` для входа по QR. Для входа и журнала уведомлений достаточно включить личные аккаунты (`COORDINATOR_ACCOUNTS_ENABLED=true`). Firebase требуется для отправки push.
+
+1. Включите Firebase Cloud Messaging API (HTTP v1) в целевом проекте. Сервисной учётной записи сервера нужно право `cloudmessaging.messages.create` на проекте. Для отправки используется OAuth 2.0. [Настройка HTTP v1 и IAM](https://firebase.google.com/docs/cloud-messaging/send/v1-api)
+2. Доставьте JSON сервисной учётной записи через хранилище секретов на сервер. Для vserver установите его в `/etc/underctrl-backend-deploy/firebase-service-account.json`, владелец `root`, группа `65532`, права `0440`. Только сервис `api` получает read-only mount `/run/secrets/firebase-service-account`. Файл остаётся вне репозитория и Docker-образа. В Android-приложении используется его собственный клиентский `google-services.json`.
+3. В `.env` выставьте `COORDINATOR_ACCOUNTS_ENABLED=true`, `MOBILE_PUSH_ENABLED=true` и `FIREBASE_PROJECT_ID=underctrl-d087a`. На vserver обновите установленные Compose-файлы и скрипт автодеплоя через `deploy/install-backend-deploy.sh`. Автодеплой подключает `compose.firebase.yml` при наличии серверного секрета. При первом включении или замене секрета пересоздайте контейнер API с той же рабочей версией образа и этим overlay.
+4. Для обычного Compose укажите в `.env` переменную `FIREBASE_CREDENTIALS_FILE` с абсолютным путём к читаемому контейнером файлу и запустите `docker compose -f docker-compose.yml -f compose.firebase.yml up -d --build`. При запуске бинарника вне Docker экспортируйте `GOOGLE_APPLICATION_CREDENTIALS` с путём к серверному JSON.
+5. После запуска войдите в личный кабинет и проверьте первое реальное уведомление с тестового устройства. Порядок проверки и формат сообщений приведены в [руководстве для мобильного клиента](docs/mobile.md#проверка-на-устройстве).
+
+При `503 MOBILE_PUSH_DISABLED` проверьте флаг и режим личных учётных записей. Если QR работает, но уведомление не пришло, проверьте журналы `api` на ошибки OAuth и HTTP-статус FCM. При `403` проверьте разрешение отправителя, включение API и совпадение проекта с приложением. Перед отправкой убедитесь, что устройство привязано, а тестовый инцидент вошёл в активный P1 после привязки.

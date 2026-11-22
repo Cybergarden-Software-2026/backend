@@ -204,3 +204,51 @@ async fn demo_routes_are_documented() {
     assert!(spec["paths"]["/api/v1/incidents"]["put"].is_object());
     assert!(spec["components"]["schemas"]["DemoRequest"].is_object());
 }
+
+#[tokio::test]
+async fn mobile_contract_distinguishes_session_and_push_bearers() {
+    let (_, _, spec) = call(app(&[]), get("/api/v1/openapi.json")).await;
+    let owner = json!([{"CoordinatorSession":[]}]);
+    let device = json!([{"MobileSessionBearer":[]},{"MobileDeviceBearer":[]}]);
+    let session = json!([{"MobileSessionBearer":[]}]);
+    let qr = json!([]);
+    for (method, path, auth, success) in [
+        ("post", "pairings", &owner, "201"),
+        ("post", "session", &qr, "201"),
+        ("get", "session", &session, "200"),
+        ("delete", "session", &session, "204"),
+        ("get", "notifications", &session, "200"),
+        ("put", "notifications/{notification_id}/read", &session, "204"),
+        ("get", "devices", &owner, "200"),
+        ("post", "devices", &qr, "201"),
+        ("put", "devices/current/token", &device, "204"),
+        ("delete", "devices/current", &device, "204"),
+        ("delete", "devices/{device_id}", &owner, "204"),
+    ] {
+        let operation = &spec["paths"][format!("/api/v1/mobile/{path}")][method];
+        assert_eq!(&operation["security"], auth, "{method} {path}");
+        assert!(operation["responses"][success].is_object());
+    }
+    let schemas = &spec["components"]["schemas"];
+    assert_eq!(schemas["MobileLogin"]["required"], json!(["code", "deviceId"]));
+    assert_eq!(
+        schemas["MobileLogin"]["properties"]["platform"]["default"],
+        "android"
+    );
+    assert_eq!(
+        schemas["MobileLoginResult"]["required"],
+        json!(["token", "tokenType", "deviceId", "user"])
+    );
+    assert_eq!(schemas["MobileSession"]["required"], json!(["deviceId", "user"]));
+    let registration = &schemas["MobileRegistration"];
+    assert_eq!(registration["required"], json!(["code", "platform", "fcmToken"]));
+    let target = &schemas["MobileFcmTargetType"];
+    assert_eq!(target["enum"], json!(["token", "fid"]));
+    assert_eq!(target["default"], "token");
+    for input in ["MobileRegistration", "MobileTokenUpdate"] {
+        assert_eq!(
+            schemas[input]["properties"]["fcmTargetType"]["$ref"],
+            "#/components/schemas/MobileFcmTargetType"
+        );
+    }
+}
