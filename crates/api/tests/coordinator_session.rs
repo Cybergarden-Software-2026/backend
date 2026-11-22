@@ -600,3 +600,198 @@ async fn assignment_and_notification_state_take_authenticated_identity() {
     }
     env.finish().await;
 }
+
+#[tokio::test]
+async fn shift_statistics_use_personal_assignment_history_and_keep_shared_totals() {
+    let first_login = "operator-a";
+    let second_login = "operator-b";
+    let mut vars = ACCOUNTS.to_vec();
+    vars.push(("DEFAULT_USER_ID", second_login));
+    let Some(mut env) = Env::with_vars(&vars).await else {
+        return;
+    };
+    let mut source = common::records();
+    source.truncate(5);
+    for (incident, (submit_date, priority)) in source.iter_mut().zip([
+        ("2026-11-20T11:59:31Z", 4),
+        ("2026-11-20T11:50:02Z", 3),
+        ("2026-11-20T11:59:03Z", 2),
+        ("2026-11-20T11:59:00Z", 4),
+        ("2026-11-20T11:59:00Z", 4),
+    ]) {
+        common::update(
+            incident,
+            &[
+                ("stateEnum", json!("Assigned")),
+                ("stateId", json!(0)),
+                ("assignedGroupName", Value::Null),
+                ("priorityId", json!(priority)),
+                ("submitDate", json!(submit_date)),
+            ],
+        );
+    }
+    env.write_json(&source);
+    assert!(env.tick().await.accepted());
+    sqlx::query("INSERT INTO teams (name) VALUES ('Shift test team')")
+        .execute(env.pool())
+        .await
+        .unwrap();
+
+    let issued = create_accounts(
+        env.pool(),
+        &[
+            AccountSpec {
+                login: first_login,
+                display_name: "Operator A",
+            },
+            AccountSpec {
+                login: second_login,
+                display_name: "Operator B",
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let personal = app(&env);
+    let first = login(&personal, &issued[0].key, false, FRONTEND).await;
+    let second = login(&personal, &issued[1].key, false, FRONTEND).await;
+    let (first_cookie, _) = cookie(&first);
+    let (second_cookie, _) = cookie(&second);
+
+    let mut open_settings = (*env.settings).clone();
+    open_settings.coordinator_accounts_enabled = false;
+    let open = router(AppState::with_clock(
+        Arc::new(open_settings),
+        env.pool().clone(),
+        env.clock.as_clock(),
+    ));
+    let shared = router(AppState::with_clock(
+        Arc::new(
+            Settings::from_vars([
+                ("DATABASE_URL", env.db.url.as_str()),
+                ("COORDINATOR_ACCESS_KEY", TEST_KEY),
+                ("CORS_ORIGINS", r#"["https://frontend.example.test"]"#),
+                ("DEFAULT_USER_ID", first_login),
+            ])
+            .unwrap(),
+        ),
+        env.pool().clone(),
+        env.clock.as_clock(),
+    ));
+    let shared_session = login(&shared, TEST_KEY, false, FRONTEND).await;
+    let (shared_cookie, _) = cookie(&shared_session);
+
+    let mut revision = 1;
+    let mut assigned_revisions = Vec::new();
+    for (incident, (app, session)) in source.iter().zip([
+        (&personal, Some(first_cookie)),
+        (&personal, Some(second_cookie)),
+        (&personal, Some(first_cookie)),
+        (&open, None),
+        (&shared, Some(shared_cookie)),
+    ]) {
+        let sys_id = incident["sysId"].as_str().unwrap();
+        let mut headers = vec![("Content-Type", "application/json")];
+        headers.extend(session.map(|session| ("Cookie", session)));
+        let response = request(
+            app,
+            "POST",
+            &format!("/api/v1/incidents/{sys_id}/assignment"),
+            &headers,
+            Body::from(json!({"team":"Shift test team","expectedRevision":revision}).to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        revision = json_response(response).await["revision"].as_i64().unwrap();
+        assigned_revisions.push(revision);
+        env.clock.advance(1.0);
+    }
+
+    let payloads: Vec<Value> =
+        sqlx::query_scalar("SELECT payload FROM dashboard_events WHERE reason = 'assignment' ORDER BY id")
+            .fetch_all(env.pool())
+            .await
+            .unwrap();
+    assert_eq!(payloads.len(), 5);
+    for (payload, (actor, actor_login)) in payloads.iter().zip([
+        (first_login, json!(first_login)),
+        (second_login, json!(second_login)),
+        (first_login, json!(first_login)),
+        (second_login, Value::Null),
+        (first_login, Value::Null),
+    ]) {
+        assert_eq!(payload["actor"], actor);
+        assert_eq!(payload.get("actorLogin"), Some(&actor_login));
+    }
+
+    // Older rows lacked actorLogin. Only the unambiguous personal assignment
+    // can be recovered from actor alone.
+    sqlx::query("UPDATE dashboard_events SET payload = payload - 'actorLogin' WHERE id = ANY($1)")
+        .bind(&assigned_revisions[2..4])
+        .execute(env.pool())
+        .await
+        .unwrap();
+
+    let range = "/api/v1/statistics/shift?from=2026-11-20T12:00:00Z&to=2026-11-20T12:01:00Z";
+    let statistics = async |app: &Router, session: Option<&str>, claimed_login: &str| {
+        let mut headers = vec![("X-User-Id", claimed_login)];
+        headers.extend(session.map(|session| ("Cookie", session)));
+        let response = request(app, "GET", range, &headers, Body::empty()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        json_response(response).await
+    };
+    for (login, name, session, other_login, expected_indices, average, critical, kpi_met) in [
+        (
+            first_login,
+            "Operator A",
+            first_cookie,
+            second_login,
+            &[2, 0][..],
+            45_000.0,
+            1,
+            2,
+        ),
+        (
+            second_login,
+            "Operator B",
+            second_cookie,
+            first_login,
+            &[1][..],
+            600_000.0,
+            0,
+            0,
+        ),
+    ] {
+        let report = statistics(&personal, Some(session), other_login).await;
+        assert_eq!(report["coordinator"], json!({"id":login,"name":name}));
+        assert_eq!(report["transferred"], expected_indices.len());
+        assert_eq!(report["critical"], critical);
+        assert_eq!(report["measured"], expected_indices.len());
+        assert_eq!(report["averageMs"].as_f64(), Some(average));
+        assert_eq!(report["kpiMet"], kpi_met);
+        let transfers = report["transfers"].as_array().unwrap();
+        assert_eq!(transfers.len(), expected_indices.len());
+        for (transfer, &index) in transfers.iter().zip(expected_indices) {
+            assert_eq!(transfer["coordinatorId"], login);
+            assert_eq!(transfer["incidentId"], source[index]["id"]);
+        }
+    }
+
+    for (app, session) in [(&open, None), (&shared, Some(shared_cookie))] {
+        let report = statistics(app, session, first_login).await;
+        assert_eq!(
+            report["coordinator"],
+            json!({"id":"shift","name":"Смена координаторов"})
+        );
+        assert_eq!(report["transferred"], 5);
+        assert_eq!(report["critical"], 3);
+        assert!(
+            report["transfers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|transfer| transfer["coordinatorId"] == "shift")
+        );
+    }
+    env.finish().await;
+}
