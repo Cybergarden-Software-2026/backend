@@ -139,6 +139,57 @@ async fn status_503_before_first_snapshot() {
     api.finish().await;
 }
 
+#[tokio::test]
+async fn form_incident_can_be_viewed_and_assigned_before_first_itsm_snapshot() {
+    let api = api!();
+    const ANSWER: &str = "4ef12276-4b5e-435e-921c-8cb07d84ae9e";
+    let sys_id = format!("web-form-{ANSWER}");
+    let raw = json!({
+        "id": "INC-WEB-42",
+        "sysId": sys_id,
+        "header": "Сообщение из формы",
+        "stateEnum": "Assigned",
+        "priorityId": 2,
+        "submitDate": "2026-11-20T12:00:00Z"
+    });
+    let mut tx = api.e.pool().begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO incidents (id, sys_id, header, normalized_state, priority_id, submit_date, raw, content_hash)
+         VALUES ('INC-WEB-42', $1, 'Сообщение из формы', 'Assigned', 2, '2026-11-20T12:00:00Z', $2, 'form')",
+    )
+    .bind(&sys_id)
+    .bind(raw)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO form_incidents VALUES ('incident-web', $1, 'INC-WEB-42')")
+        .bind(ANSWER)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO teams (name) VALUES ('Team A');
+         UPDATE import_state SET last_change_at = '2026-11-20T12:00:00Z' WHERE id = 1;
+         INSERT INTO dashboard_events (event_type, reason, payload)
+         VALUES ('dashboard.changed', 'import', '{}');",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let snapshot = api.json("/snapshot?view=web").await;
+    assert_eq!(snapshot["revision"], 1);
+    assert_eq!(snapshot["source"]["status"], "initializing");
+    assert_eq!(snapshot["items"][0]["header"], "Сообщение из формы");
+    assert_eq!(snapshot["items"][0]["dashboard"]["itsmUrl"], Value::Null);
+
+    let assignment = api.assign(&sys_id, "Team A", 1).await;
+    assert_eq!(assignment.status, 200, "{:?}", assignment.json());
+    assert_eq!(assignment.json()["items"][0]["assignedGroupName"], "Team A");
+    api.finish().await;
+}
+
 // ================================================================ /snapshot (API.md §3)
 
 #[tokio::test]

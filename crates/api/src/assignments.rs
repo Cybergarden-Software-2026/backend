@@ -49,7 +49,7 @@ pub(crate) async fn assign(
 
     let mut tx = state.pool.begin().await?;
     let source = import_repo::lock_state(&mut tx).await?;
-    if source.last_success_at.is_none() {
+    if source.last_success_at.is_none() && !import_repo::forms_have_incidents(&mut tx).await? {
         return Err(AppError::source_not_ready(
             "Первый снимок ещё не принят, повторите запрос позже",
         ));

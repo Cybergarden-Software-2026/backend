@@ -16,6 +16,7 @@ use dashboard_domain::incident_query::{self, IncidentFilters, QueryError};
 use dashboard_domain::projection::{
     self as proj, IncidentRow, ProjectionContext, SourceState, project_all, project_incident,
 };
+use dashboard_store::import_repo;
 use dashboard_store::read_repo::{self, ChangeEventFilter};
 use serde_json::{Map, Value, json};
 use sqlx::{PgConnection, Postgres, Transaction};
@@ -67,7 +68,7 @@ pub(crate) async fn load(state: &AppState, with_rows: bool) -> ApiResult<Loaded>
 pub(crate) async fn load_in_tx(mut tx: Transaction<'static, Postgres>, with_rows: bool) -> ApiResult<Loaded> {
     let source = read_repo::import_state(&mut tx).await?;
     let source = match source {
-        Some(s) if s.last_success_at.is_some() => s,
+        Some(s) if s.last_success_at.is_some() || import_repo::forms_have_incidents(&mut tx).await? => s,
         other => {
             return Err(
                 AppError::source_not_ready("Первый снимок ещё не принят, повторите запрос позже")
@@ -127,7 +128,7 @@ pub(crate) async fn snapshot_value(state: &AppState, loaded: &mut Loaded, web: b
         .state
         .last_change_at
         .or(loaded.state.last_success_at)
-        .expect("last_success_at проверен в load");
+        .expect("a committed file snapshot or form report sets the update timestamp");
     let project = if web {
         proj::web_incident_item
     } else {

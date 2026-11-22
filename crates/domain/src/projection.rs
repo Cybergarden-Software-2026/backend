@@ -227,6 +227,9 @@ impl IncidentProjection<'_> {
 
 /// `build_itsm_url`: URL-encoded `{sysId}` и `{id}`; без шаблона — `None`.
 pub fn build_itsm_url(template: Option<&str>, incident_id: &str, sys_id: &str) -> Option<String> {
+    if sys_id.starts_with(crate::constants::FORM_INCIDENT_SYS_ID_PREFIX) {
+        return None;
+    }
     let template = template.filter(|t| !t.is_empty())?;
     Some(
         template

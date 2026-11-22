@@ -4,14 +4,17 @@
 //! уведомления, запись журнала `dashboard_events` (новая revision) и состояние источника
 //! фиксируются вместе. При ошибке файла реестр не трогается — меняется только `import_state`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
 use dashboard_config::Settings;
 use dashboard_domain::change_detector::{ImportPlan, IncidentPlan, PlanOptions, build_import_plan};
-use dashboard_domain::constants::{ChangeType, DashboardEventReason, NotificationType, SourceStatus};
+use dashboard_domain::constants::{
+    ChangeType, DashboardEventReason, FORM_INCIDENT_SYS_ID_PREFIX, NotificationType, SourceStatus,
+};
+use dashboard_domain::normalizer::{iso_z, normalize_record};
 use dashboard_domain::validator::{ValidatedSnapshot, parse_and_validate};
 use dashboard_store::bell;
 use dashboard_store::import_repo::{
@@ -20,6 +23,7 @@ use dashboard_store::import_repo::{
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
 
+use crate::form_worker::{FORM_ID, FormReport};
 use crate::reader::{FileFingerprint, ReadResult};
 
 /// Итог обработки (`OutcomeStatus` Python-версии).
@@ -309,7 +313,7 @@ impl ImportService {
         let mut tx = self.pool.begin().await?;
         let mut state = repo::lock_state(&mut tx).await?;
         let now = self.now();
-        let rows = repo::all_incidents(&mut tx).await?;
+        let rows = repo::itsm_incidents(&mut tx).await?;
         let is_initial = state.last_success_at.is_none() && rows.is_empty();
         crate::assignment::reconcile_source(
             &mut tx,
@@ -320,14 +324,7 @@ impl ImportService {
         let incident_count = validated.incidents.len();
         let warnings = validated.warnings;
 
-        let options = PlanOptions {
-            is_initial,
-            naive_tz: self.settings.source_naive_timezone,
-            coordinator_group: self.settings.coordinator_group_name.clone(),
-            now: Some(now),
-            resolved_window: TimeDelta::hours(i64::from(self.settings.critical_resolved_window_hours)),
-        };
-        let plan = build_import_plan(&rows, validated.incidents, &options);
+        let plan = build_import_plan(&rows, validated.incidents, &self.plan_options(now, is_initial));
         let was_error = state.status == SourceStatus::Error.as_str();
         let mut revision = None;
         if plan.has_changes() || was_error || is_initial {
@@ -395,6 +392,95 @@ impl ImportService {
             );
         }
         Ok(outcome)
+    }
+
+    fn plan_options(&self, now: DateTime<Utc>, is_initial: bool) -> PlanOptions {
+        PlanOptions {
+            is_initial,
+            naive_tz: self.settings.source_naive_timezone,
+            coordinator_group: self.settings.coordinator_group_name.clone(),
+            now: Some(now),
+            resolved_window: TimeDelta::hours(i64::from(self.settings.critical_resolved_window_hours)),
+        }
+    }
+
+    /// Writes a page and its cursor together. Returns false if another worker committed it first.
+    pub(crate) async fn apply_form_page(
+        &self,
+        expected_after: i64,
+        next_after: i64,
+        reports: Vec<FormReport>,
+    ) -> Result<bool, ImportError> {
+        let mut tx = self.pool.begin().await?;
+        let mut state = repo::lock_state(&mut tx).await?;
+        if repo::forms_cursor(&mut tx).await? != expected_after {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        let mut entries = Vec::new();
+        let mut identities = Vec::new();
+        if !reports.is_empty() {
+            let answer_ids: Vec<_> = reports.iter().map(|r| r.answer_id.as_str()).collect();
+            let mut known: HashSet<_> = repo::known_form_answers(&mut tx, FORM_ID, &answer_ids)
+                .await?
+                .into_iter()
+                .collect();
+            for report in reports {
+                if !known.insert(report.answer_id.clone()) {
+                    continue;
+                }
+                let registered_at = iso_z(&report.received_at);
+                let raw = json!({
+                    "id": format!("INC-WEB-{}", report.id),
+                    "sysId": format!("{FORM_INCIDENT_SYS_ID_PREFIX}{}", report.answer_id),
+                    "header": report.title.replace('\0', "�"),
+                    "description": report.description.replace('\0', "�"),
+                    "service": report.service.replace('\0', "�"),
+                    "priorityId": report.priority_id,
+                    "stateEnum": "Assigned",
+                    "stateId": 0,
+                    "receivingChannel": "Веб-форма",
+                    "assignedGroupName": self.settings.coordinator_group_name,
+                    "submitDate": registered_at,
+                    "lastAssignmentToTeamDateTime": registered_at,
+                });
+                let Value::Object(raw) = raw else { unreachable!() };
+                let incident = normalize_record(raw, self.settings.source_naive_timezone).map_err(|_| {
+                    ImportError::Task(format!("Invalid incident at form feed row {}", report.id))
+                })?;
+                identities.push((report.answer_id, incident.id.clone()));
+                entries.push(incident);
+            }
+        }
+
+        if !entries.is_empty() {
+            let now = self.now();
+            sqlx::query("INSERT INTO teams (name) VALUES ($1) ON CONFLICT DO NOTHING")
+                .bind(&self.settings.coordinator_group_name)
+                .execute(&mut *tx)
+                .await?;
+            let plan = build_import_plan(&[], entries, &self.plan_options(now, false));
+            let mut payload = event_payload(&plan);
+            payload["source"] = json!(FORM_ID);
+            let revision =
+                repo::new_dashboard_event(&mut tx, DashboardEventReason::Import, &payload, now).await?;
+            apply_plan(&mut tx, &plan, revision, now).await?;
+            for (answer_id, incident_id) in identities {
+                repo::record_form_incident(&mut tx, FORM_ID, &answer_id, &incident_id).await?;
+            }
+            if self.settings.llm_enabled {
+                let spec = dashboard_store::analysis_repo::JobSpec::summary(&self.settings);
+                dashboard_store::analysis_repo::enqueue(&mut tx, &spec).await?;
+            }
+            state.last_change_at = Some(now);
+            state.updated_at = now;
+            repo::save_state(&mut tx, &state).await?;
+        }
+
+        repo::save_forms_cursor(&mut tx, next_after).await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// Снимает отметку «Решён», когда истекло окно 24 ч, и публикует новую ревизию снимка.

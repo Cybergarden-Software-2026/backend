@@ -61,10 +61,12 @@ pub(crate) async fn reconcile_source(
         .execute(&mut *conn)
         .await?;
 
-    let rows: Vec<(String, Value, String, DateTime<Utc>)> =
-        sqlx::query_as("SELECT incident_id, source_assignment, team, assigned_at FROM assignment_overrides")
-            .fetch_all(&mut *conn)
-            .await?;
+    let rows: Vec<(String, Value, String, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT incident_id, source_assignment, team, assigned_at FROM assignment_overrides a
+         WHERE NOT EXISTS (SELECT 1 FROM form_incidents f WHERE f.incident_id = a.incident_id)",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
     let mut overrides: HashMap<_, _> = rows
         .into_iter()
         .map(|(id, source, team, at)| (id, (source, team, at)))
