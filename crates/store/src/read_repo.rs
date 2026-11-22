@@ -7,7 +7,9 @@
 
 use chrono::{DateTime, Utc};
 use dashboard_domain::constants::{NormalizedState, ResolutionPhase};
-use dashboard_domain::projection::{ChangeEventRow, IncidentRow, NotificationRow, SourceState};
+use dashboard_domain::projection::{
+    ChangeEventRow, CoordinationClaim, IncidentRow, NotificationRow, SourceState,
+};
 use dashboard_domain::pycompat;
 use serde_json::Value;
 use sqlx::postgres::PgRow;
@@ -63,7 +65,38 @@ const INCIDENT_COLUMNS: &str = "pk, id, sys_id, header, description, short_descr
     last_assignment_to_team_at, waiting_exit_date, is_effect, is_reason, is_double, is_master, \
     is_root_incident, is_need_up, elimination_type, elimination_type_id, raw, incident_revision, \
     is_present, removed_at, resolution_phase, resolved_detected_at, recently_resolved_until, \
-    first_seen_at, updated_at";
+    first_seen_at, updated_at, a.login AS claim_login, a.display_name AS claim_display_name, c.claimed_at";
+
+const INCIDENT_WITH_CLAIM: &str = "incidents i
+    LEFT JOIN incident_coordination_claims c ON c.incident_pk = i.pk
+    LEFT JOIN coordinator_accounts a ON a.login = c.account_login AND a.disabled_at IS NULL";
+
+pub fn coordination_claim_from_row(row: &PgRow) -> Result<Option<CoordinationClaim>, sqlx::Error> {
+    let Some(login) = row.try_get("claim_login")? else {
+        return Ok(None);
+    };
+    Ok(Some(CoordinationClaim {
+        login,
+        display_name: row.try_get("claim_display_name")?,
+        claimed_at: row.try_get("claimed_at")?,
+    }))
+}
+
+pub async fn coordination_claim(
+    conn: &mut PgConnection,
+    incident_pk: i64,
+) -> Result<Option<CoordinationClaim>, sqlx::Error> {
+    sqlx::query(
+        "SELECT a.login AS claim_login, a.display_name AS claim_display_name, c.claimed_at
+         FROM incident_coordination_claims c JOIN coordinator_accounts a ON a.login = c.account_login
+         WHERE c.incident_pk = $1 AND a.disabled_at IS NULL",
+    )
+    .bind(incident_pk)
+    .try_map(|row| coordination_claim_from_row(&row))
+    .fetch_optional(conn)
+    .await
+    .map(Option::flatten)
+}
 
 fn decode_err(column: &str, message: impl std::fmt::Display) -> sqlx::Error {
     sqlx::Error::ColumnDecode {
@@ -116,6 +149,7 @@ fn incident_from_row(r: &PgRow) -> Result<IncidentRow, sqlx::Error> {
         assigned_group_name: r.try_get("assigned_group_name")?,
         assigned_employee: r.try_get("assigned_employee")?,
         assigned_employee_login: r.try_get("assigned_employee_login")?,
+        coordination_claim: coordination_claim_from_row(r)?,
         initiator_name: r.try_get("initiator_name")?,
         initiator_login: r.try_get("initiator_login")?,
         submit_date: r.try_get("submit_date")?,
@@ -149,7 +183,7 @@ fn incident_from_row(r: &PgRow) -> Result<IncidentRow, sqlx::Error> {
 /// Присутствующие в выгрузке, `ORDER BY id` (порядок — по правилам сортировки самой БД, как у
 /// Python-версии: обе версии читают одну базу одним и тем же запросом).
 pub async fn present_incidents(conn: &mut PgConnection) -> Result<Vec<IncidentRow>, sqlx::Error> {
-    let sql = format!("SELECT {INCIDENT_COLUMNS} FROM incidents WHERE is_present ORDER BY id");
+    let sql = format!("SELECT {INCIDENT_COLUMNS} FROM {INCIDENT_WITH_CLAIM} WHERE is_present ORDER BY id");
     let rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(conn).await?;
     rows.iter().map(incident_from_row).collect()
 }
@@ -199,7 +233,7 @@ pub async fn incident_by_key(conn: &mut PgConnection, key: &str) -> Result<Optio
         IncidentKey::SysId(v) => ("sys_id = $1", v),
         IncidentKey::Either(v) => ("id = $1 OR sys_id = $1", v),
     };
-    let sql = format!("SELECT {INCIDENT_COLUMNS} FROM incidents WHERE {condition} LIMIT 1");
+    let sql = format!("SELECT {INCIDENT_COLUMNS} FROM {INCIDENT_WITH_CLAIM} WHERE {condition} LIMIT 1");
     let row = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(value)
         .fetch_optional(conn)

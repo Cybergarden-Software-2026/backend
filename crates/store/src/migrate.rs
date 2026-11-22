@@ -108,6 +108,12 @@ pub const MIGRATIONS: &[SharedMigration] = &[
         description: "incident form identities and import cursor",
         sql: include_str!("../../../migrations/0012_incident_forms_up.sql"),
     },
+    SharedMigration {
+        version: 13,
+        alembic_revision: "0013",
+        description: "personal coordinator incident claims",
+        sql: include_str!("../../../migrations/0013_coordination_claims_up.sql"),
+    },
 ];
 
 /// Ключ advisory lock миграций («MTS» + 2), чтобы два процесса `migrate` не синхронизировали

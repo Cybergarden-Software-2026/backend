@@ -5,6 +5,7 @@ use dashboard_store::{import_repo, read_repo};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::coordination_claims;
 use crate::coordinator_accounts::Coordinator;
 use crate::dashboard::{load, load_in_tx, path_key, snapshot_value};
 use crate::params::Params;
@@ -75,6 +76,12 @@ pub(crate) async fn assign(
         .await?;
     if !valid {
         return Err(AppError::bad_request("Выберите команду из справочника."));
+    }
+    if state.settings.coordinator_accounts_enabled
+        && let Some(claim) = read_repo::coordination_claim(&mut tx, row.pk).await?
+        && coordinator.as_ref().map(|account| account.login.as_str()) != Some(claim.login.as_str())
+    {
+        return Err(coordination_claims::already_claimed(&claim));
     }
     if row.assigned_group_name.as_deref() != Some(&input.team) {
         let actor_login = coordinator.as_ref().map(|account| account.login.as_str());

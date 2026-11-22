@@ -97,6 +97,7 @@ pub(crate) fn context(state: &AppState, now: DateTime<Utc>) -> ProjectionContext
         coordinator_group: s.coordinator_group_name.clone(),
         warning_window: TimeDelta::minutes(i64::from(s.deadline_warning_minutes)),
         itsm_url_template: s.resolved_itsm_url_template(),
+        coordination_claims_enabled: s.coordinator_accounts_enabled,
     }
 }
 

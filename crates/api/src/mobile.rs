@@ -26,6 +26,10 @@ pub(crate) fn routes(state: AppState) -> Router<AppState> {
     let account_data = Router::new()
         .route("/mobile/incidents", get(crate::mobile_incidents::list))
         .route(
+            "/mobile/incidents/{sys_id}/coordination-claim",
+            put(crate::coordination_claims::claim).delete(crate::coordination_claims::release),
+        )
+        .route(
             "/mobile/incidents/{sys_id}/team-contact",
             post(crate::team_contact::record),
         )

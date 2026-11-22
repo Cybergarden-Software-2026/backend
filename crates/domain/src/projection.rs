@@ -47,6 +47,14 @@ fn opt_str(value: Option<&str>) -> Value {
 
 // ------------------------------------------------------------------ строки БД
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoordinationClaim {
+    pub login: String,
+    pub display_name: String,
+    pub claimed_at: DateTime<Utc>,
+}
+
 /// Строка `incidents` (ORM-модель `Incident`), все колонки.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncidentRow {
@@ -84,6 +92,7 @@ pub struct IncidentRow {
     pub assigned_group_name: Option<String>,
     pub assigned_employee: Option<String>,
     pub assigned_employee_login: Option<String>,
+    pub coordination_claim: Option<CoordinationClaim>,
     pub initiator_name: Option<String>,
     pub initiator_login: Option<String>,
     pub submit_date: DateTime<Utc>,
@@ -207,6 +216,7 @@ pub struct ProjectionContext {
     pub coordinator_group: String,
     pub warning_window: TimeDelta,
     pub itsm_url_template: Option<String>,
+    pub coordination_claims_enabled: bool,
 }
 
 /// Все производные данные одного инцидента, вычисленные один раз.
@@ -217,11 +227,19 @@ pub struct IncidentProjection<'a> {
     pub sla: SlaResult,
     pub resolution: Option<ResolutionInfo>,
     pub itsm_url: Option<String>,
+    coordination_claims_enabled: bool,
 }
 
 impl IncidentProjection<'_> {
     pub fn state(&self) -> NormalizedState {
         self.row.normalized_state
+    }
+
+    fn coordination_claim(&self) -> Option<&CoordinationClaim> {
+        self.row
+            .coordination_claim
+            .as_ref()
+            .filter(|_| self.coordination_claims_enabled)
     }
 }
 
@@ -255,6 +273,7 @@ pub fn project_incident<'a>(
         ),
         resolution: describe_resolution(row, ctx.now),
         itsm_url: build_itsm_url(ctx.itsm_url_template.as_deref(), &row.id, &row.sys_id),
+        coordination_claims_enabled: ctx.coordination_claims_enabled,
     }
 }
 
@@ -332,8 +351,11 @@ pub fn incident_item(p: &IncidentProjection<'_>) -> Value {
     item.insert("sysId".into(), raw.get("sysId").cloned().unwrap_or(Value::Null));
     item.insert("id".into(), raw.get("id").cloned().unwrap_or(Value::Null));
     item.insert("dashboard".into(), dashboard_meta(p));
+    if let Some(claim) = p.coordination_claim() {
+        item.insert("coordinationClaim".into(), json!(claim));
+    }
     for (k, v) in raw {
-        if !matches!(k.as_str(), "sysId" | "id" | "dashboard") {
+        if !matches!(k.as_str(), "sysId" | "id" | "dashboard" | "coordinationClaim") {
             item.insert(k.clone(), v.clone());
         }
     }
@@ -344,6 +366,9 @@ pub fn incident_item(p: &IncidentProjection<'_>) -> Value {
 pub fn web_incident_item(p: &IncidentProjection<'_>) -> Value {
     let mut item = incident_item(p);
     let r = p.row;
+    if p.coordination_claims_enabled {
+        item["coordinationClaim"] = json!(p.coordination_claim());
+    }
     item["dashboard"]["sourceDates"] = json!({
         "submitDate": r.submit_date,
         "deadline": r.deadline,
@@ -441,7 +466,7 @@ pub const fn arch_status(state: NormalizedState) -> &'static str {
 
 fn dashboard_fields(p: &IncidentProjection<'_>) -> Map<String, Value> {
     let r = p.row;
-    let Value::Object(map) = json!({
+    let Value::Object(mut map) = json!({
         "id": r.id,
         "sysId": r.sys_id,
         "incidentRevision": r.incident_revision,
@@ -468,6 +493,9 @@ fn dashboard_fields(p: &IncidentProjection<'_>) -> Map<String, Value> {
     }) else {
         unreachable!()
     };
+    if let Some(claim) = p.coordination_claim() {
+        map.insert("coordinationClaim".into(), json!(claim));
+    }
     map
 }
 

@@ -2,6 +2,8 @@ use axum::{Json, extract::State};
 use chrono::{DateTime, SecondsFormat, Utc};
 use dashboard_domain::constants::NormalizedState;
 use dashboard_domain::header::{Header, header_team};
+use dashboard_domain::projection::CoordinationClaim;
+use dashboard_store::read_repo;
 use serde::Serialize;
 use sqlx::{Row, postgres::PgRow};
 
@@ -30,6 +32,7 @@ struct Incident {
     deadline: Option<String>,
     last_assignment_to_team_date_time: Option<String>,
     header_kind: Option<&'static str>,
+    coordination_claim: Option<CoordinationClaim>,
 }
 
 fn utc_millis(value: DateTime<Utc>) -> String {
@@ -49,8 +52,11 @@ pub(crate) async fn list(State(state): State<AppState>) -> ApiResult<Json<Incide
                 i.raw ->> 'assignedGroupName' AS team,
                 i.submit_date, i.deadline, i.last_assignment_to_team_at,
                 coalesce(t.phone, team_demo_phone(t.name)) AS team_phone,
-                t.name IS NOT NULL AND t.phone IS NULL AS team_phone_is_test
+                t.name IS NOT NULL AND t.phone IS NULL AS team_phone_is_test,
+                a.login AS claim_login, a.display_name AS claim_display_name, c.claimed_at
          FROM incidents i LEFT JOIN teams t ON t.name = i.assigned_group_name
+         LEFT JOIN incident_coordination_claims c ON c.incident_pk = i.pk
+         LEFT JOIN coordinator_accounts a ON a.login = c.account_login AND a.disabled_at IS NULL
          WHERE i.is_present ORDER BY i.id, i.sys_id",
     )
     .try_map(|row: PgRow| {
@@ -91,6 +97,7 @@ pub(crate) async fn list(State(state): State<AppState>) -> ApiResult<Json<Incide
             deadline: deadline.map(utc_millis),
             last_assignment_to_team_date_time: assignment.map(utc_millis),
             header_kind: kind,
+            coordination_claim: read_repo::coordination_claim_from_row(&row)?,
         })
     })
     .fetch_all(loaded.conn())

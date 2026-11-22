@@ -10,6 +10,7 @@
 
 mod analysis;
 pub mod assignments;
+mod coordination_claims;
 pub mod coordinator_accounts;
 mod coordinator_session;
 pub mod dashboard;
@@ -120,6 +121,10 @@ fn api_v1(state: AppState) -> Router<AppState> {
         .route("/snapshot", get(dashboard::snapshot))
         .route("/teams", get(assignments::teams))
         .route("/incidents/{key}/assignment", post(assignments::assign))
+        .route(
+            "/incidents/{sys_id}/coordination-claim",
+            put(coordination_claims::claim).delete(coordination_claims::release),
+        )
         .route("/dashboard", get(dashboard::dashboard))
         .route("/statistics/shift", get(statistics::shift))
         .route(
@@ -227,6 +232,8 @@ const ROUTE_PATTERNS: &[&str] = &[
     "/api/v1/snapshot",
     "/api/v1/teams",
     "/api/v1/incidents/*/assignment",
+    "/api/v1/incidents/*/coordination-claim",
+    "/api/v1/mobile/incidents/*/coordination-claim",
     "/api/v1/dashboard",
     "/api/v1/statistics/shift",
     "/api/v1/problems/clusters",

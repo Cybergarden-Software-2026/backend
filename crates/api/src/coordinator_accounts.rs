@@ -5,7 +5,10 @@ use std::collections::HashSet;
 use anyhow::{Context, bail};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
+use dashboard_domain::constants::DashboardEventReason;
+use dashboard_store::import_repo;
 use serde::Serialize;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokio::sync::Semaphore;
@@ -134,10 +137,11 @@ pub async fn create_accounts(
     Ok(issued)
 }
 
-/// Revoke the account's sessions, unused QR code and registered devices under the account lock.
+/// Revoke the account's sessions, devices and incident claims.
 pub async fn disable_account(pool: &PgPool, login: &str) -> anyhow::Result<bool> {
     let login = normalized_login(login).context("invalid coordinator login")?;
     let mut tx = pool.begin().await?;
+    import_repo::lock_state(&mut tx).await?;
     let disabled = sqlx::query(
         "UPDATE coordinator_accounts SET disabled_at = now() WHERE login = $1 AND disabled_at IS NULL",
     )
@@ -156,9 +160,22 @@ pub async fn disable_account(pool: &PgPool, login: &str) -> anyhow::Result<bool>
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM coordinator_sessions WHERE account_login = $1")
-            .bind(login)
+            .bind(&login)
             .execute(&mut *tx)
             .await?;
+        let claims = sqlx::query("DELETE FROM incident_coordination_claims WHERE account_login = $1")
+            .bind(&login)
+            .execute(&mut *tx)
+            .await?;
+        if claims.rows_affected() > 0 {
+            import_repo::new_dashboard_event(
+                &mut tx,
+                DashboardEventReason::CoordinationClaim,
+                &json!({"schemaVersion": 1}),
+                (crate::system_clock())(),
+            )
+            .await?;
+        }
     }
     tx.commit().await?;
     Ok(disabled)
