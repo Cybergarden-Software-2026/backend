@@ -122,6 +122,289 @@ async fn login_device(app: &Router, code: &str, device_id: &str) -> Response {
     .await
 }
 
+async fn next_snapshot(body: &mut Body) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(frame) = body.frame().await {
+            let bytes = frame.unwrap().into_data().unwrap();
+            let lines = std::str::from_utf8(&bytes).unwrap();
+            if let Some(data) = lines.lines().find_map(|line| line.strip_prefix("data: ")) {
+                return serde_json::from_str(data).unwrap();
+            }
+        }
+        panic!("SSE stream closed before the snapshot");
+    })
+    .await
+    .expect("timed out waiting for a snapshot")
+}
+
+#[tokio::test]
+async fn coordination_claim_is_shared_across_web_and_mobile_and_clears_when_routed() {
+    let Some(mut env) = Env::with_vars(&[("COORDINATOR_ACCOUNTS_ENABLED", "true")]).await else {
+        return;
+    };
+    let state = AppState::with_clock(env.settings.clone(), env.pool().clone(), env.clock.as_clock());
+    let app = router(state.clone());
+    let alice = owner(&env, &app, "alice").await;
+    let bob = owner(&env, &app, "bob").await;
+    let mobile_session = read(
+        login_device(&app, &pairing(&app, &alice).await, "coordinator-phone").await,
+        StatusCode::CREATED,
+    )
+    .await;
+    let bearer = format!("Bearer {}", mobile_session["token"].as_str().unwrap());
+    let mobile = [("authorization", bearer.as_str())];
+    let alice_web = [("cookie", alice.as_str())];
+    let bob_web = [("cookie", bob.as_str())];
+
+    let mut records = common::records();
+    let mut incident = records.remove(0);
+    let mut resolver_incident = records.remove(0);
+    common::update(
+        &mut incident,
+        &[
+            ("assignedGroupName", json!(common::COORD)),
+            ("stateEnum", json!("Assigned")),
+            ("stateId", json!(0)),
+        ],
+    );
+    common::update(&mut resolver_incident, &[("assignedGroupName", json!("Team A"))]);
+    env.write_json(&[incident.clone(), resolver_incident.clone()]);
+    assert!(env.tick().await.accepted());
+
+    let sys_id = incident["sysId"].as_str().unwrap();
+    let web_path = format!("/api/v1/incidents/{sys_id}/coordination-claim");
+    let mobile_path = format!("{INCIDENTS}/{sys_id}/coordination-claim");
+    let detail_path = format!("/api/v1/incidents/{sys_id}?view=web");
+    let assignment_path = format!("/api/v1/incidents/{sys_id}/assignment");
+    let queue_path = "/api/v1/incidents?page=1&pageSize=10&group=coordinators";
+    let unclaimed = read(
+        call(&app, "GET", &detail_path, &bob_web, None).await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(unclaimed["incident"].get("coordinationClaim"), Some(&Value::Null));
+    let bell_before = env
+        .string("SELECT to_jsonb(b)::text FROM mobile_bell_state b JOIN incidents i ON i.pk = b.incident_pk WHERE i.assigned_group_name <> 'Team A'")
+        .await;
+
+    let mut stream = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/events/stream?view=web")
+                .header(header::COOKIE, &bob)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body();
+    let initial = next_snapshot(&mut stream).await;
+    assert_eq!(initial["revision"], unclaimed["revision"]);
+
+    let (from_mobile, from_web) = tokio::join!(
+        call(&app, "PUT", &mobile_path, &mobile, None),
+        call(&app, "PUT", &web_path, &bob_web, None),
+    );
+    let (success, conflict, winner_web, loser_web) = if from_mobile.status() == StatusCode::OK {
+        (from_mobile, from_web, &alice_web, &bob_web)
+    } else {
+        (from_web, from_mobile, &bob_web, &alice_web)
+    };
+    let taken = read(success, StatusCode::OK).await;
+    let claim = &taken["coordinationClaim"];
+    let conflict = read(conflict, StatusCode::CONFLICT).await;
+    assert!(!claim["claimedAt"].as_str().unwrap().is_empty());
+    assert_eq!(conflict["code"], "COORDINATION_ALREADY_CLAIMED");
+    assert_eq!(conflict["details"]["coordinationClaim"], *claim);
+    assert_eq!(
+        read(
+            call(&app, "PUT", &web_path, winner_web, None).await,
+            StatusCode::OK
+        )
+        .await,
+        taken
+    );
+    let denied = read(
+        call(&app, "DELETE", &web_path, loser_web, None).await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(denied["code"], "COORDINATION_CLAIM_NOT_OWNED");
+    assert_eq!(denied["details"]["coordinationClaim"], *claim);
+
+    let snapshot = next_snapshot(&mut stream).await;
+    drop(stream);
+    let queue = read(
+        call(&app, "GET", queue_path, loser_web, None).await,
+        StatusCode::OK,
+    )
+    .await;
+    let mobile_list = read(call(&app, "GET", INCIDENTS, &mobile, None).await, StatusCode::OK).await;
+    for data in [snapshot, queue, mobile_list] {
+        assert_eq!(data["revision"], taken["revision"]);
+        let item = data["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["sysId"] == sys_id)
+            .unwrap();
+        assert_eq!(item["coordinationClaim"], *claim);
+    }
+    let detail = read(
+        call(&app, "GET", &detail_path, loser_web, None).await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(detail["incident"]["coordinationClaim"], *claim);
+    assert_eq!(detail["incident"]["stateEnum"], "Assigned");
+    assert_eq!(detail["incident"]["assignedGroupName"], common::COORD);
+    let mut open_settings = (*env.settings).clone();
+    open_settings.coordinator_accounts_enabled = false;
+    let open_app = router(AppState::with_clock(
+        Arc::new(open_settings),
+        env.pool().clone(),
+        env.clock.as_clock(),
+    ));
+    let public_detail = read(
+        open_app
+            .oneshot(Request::get(detail_path.as_str()).body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(public_detail["incident"].get("coordinationClaim").is_none());
+    assert!(public_detail["details"].get("coordinationClaim").is_none());
+    assert_eq!(
+        env.string("SELECT to_jsonb(b)::text FROM mobile_bell_state b JOIN incidents i ON i.pk = b.incident_pk WHERE i.assigned_group_name <> 'Team A'").await,
+        bell_before
+    );
+    assert_eq!(
+        env.i64("SELECT count(*) FROM dashboard_events WHERE reason = 'coordination_claim'")
+            .await,
+        1
+    );
+
+    let team_assignment = json!({"team":"Team A", "expectedRevision":taken["revision"]});
+    let denied = read(
+        call(&app, "POST", &assignment_path, loser_web, Some(team_assignment)).await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(denied["code"], "COORDINATION_ALREADY_CLAIMED");
+    assert_eq!(denied["details"]["coordinationClaim"], *claim);
+
+    let released = read(
+        call(&app, "DELETE", &web_path, winner_web, None).await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(released.get("coordinationClaim"), Some(&Value::Null));
+    assert_eq!(
+        read(
+            call(&app, "DELETE", &web_path, winner_web, None).await,
+            StatusCode::OK
+        )
+        .await,
+        released
+    );
+    let taken = read(
+        call(&app, "PUT", &web_path, loser_web, None).await,
+        StatusCode::OK,
+    )
+    .await;
+    let claim = &taken["coordinationClaim"];
+    common::update(&mut incident, &[("header", json!("Changed title"))]);
+    env.write_json(&[incident.clone(), resolver_incident]);
+    assert!(env.tick().await.accepted());
+    let detail = read(
+        call(&app, "GET", &detail_path, loser_web, None).await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(detail["incident"]["coordinationClaim"], *claim);
+
+    let team_assignment = json!({"team":"Team A", "expectedRevision":detail["revision"]});
+    read(
+        call(&app, "POST", &assignment_path, loser_web, Some(team_assignment)).await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        env.i64("SELECT count(*) FROM incident_coordination_claims").await,
+        0
+    );
+    let unwanted = read(
+        call(&app, "PUT", &mobile_path, &mobile, None).await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(unwanted["code"], "COORDINATION_CLAIM_UNAVAILABLE");
+    state.shutdown_streams();
+    env.finish().await;
+}
+
+#[tokio::test]
+async fn imported_resolution_and_removal_clear_claims_without_reviving_them() {
+    let Some(mut env) = Env::with_vars(&[("COORDINATOR_ACCOUNTS_ENABLED", "true")]).await else {
+        return;
+    };
+    let app = router(AppState::with_clock(
+        env.settings.clone(),
+        env.pool().clone(),
+        env.clock.as_clock(),
+    ));
+    let cookie = owner(&env, &app, "alice").await;
+    let web = [("cookie", cookie.as_str())];
+    let mut records = common::records();
+    records.truncate(2);
+    common::update(
+        &mut records[0],
+        &[
+            ("assignedGroupName", json!(common::COORD)),
+            ("stateEnum", json!("Assigned")),
+            ("stateId", json!(0)),
+        ],
+    );
+    let sys_id = records[0]["sysId"].as_str().unwrap();
+    let claim_path = format!("/api/v1/incidents/{sys_id}/coordination-claim");
+    let detail_path = format!("/api/v1/incidents/{sys_id}?view=web");
+
+    env.write_json(&records);
+    assert!(env.tick().await.accepted());
+    read(call(&app, "PUT", &claim_path, &web, None).await, StatusCode::OK).await;
+    let mut resolved = records.clone();
+    common::update(
+        &mut resolved[0],
+        &[("stateEnum", json!("Resolved")), ("stateId", json!(7))],
+    );
+    env.write_json(&resolved);
+    assert!(env.tick().await.accepted());
+    assert_eq!(
+        env.i64("SELECT count(*) FROM incident_coordination_claims").await,
+        0
+    );
+
+    env.write_json(&records);
+    assert!(env.tick().await.accepted());
+    let reopened = read(call(&app, "GET", &detail_path, &web, None).await, StatusCode::OK).await;
+    assert_eq!(reopened["incident"].get("coordinationClaim"), Some(&Value::Null));
+    read(call(&app, "PUT", &claim_path, &web, None).await, StatusCode::OK).await;
+    env.write_json(&records[1..]);
+    assert!(env.tick().await.accepted());
+    assert_eq!(
+        env.i64("SELECT count(*) FROM incident_coordination_claims").await,
+        0
+    );
+    let not_found = read(
+        call(&app, "PUT", &claim_path, &web, None).await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    assert_eq!(not_found["code"], "INCIDENT_NOT_FOUND");
+    env.finish().await;
+}
+
 #[tokio::test]
 async fn mobile_team_contact_is_attributed_published_and_retry_safe() {
     let Some(mut env) = Env::with_vars(&[("COORDINATOR_ACCOUNTS_ENABLED", "true")]).await else {
@@ -807,7 +1090,7 @@ async fn mobile_incidents_returns_the_complete_current_header_input_without_fire
             "priorityId":4, "assignedGroupName":"Team A", "teamPhone":phone, "teamPhoneIsTest":true,
             "submitDate":"2026-11-20T11:00:00.123Z",
             "deadline":"2026-11-20T12:05:00.987Z", "lastAssignmentToTeamDateTime":"2026-11-20T11:45:00.456Z",
-            "headerKind":"critical"
+            "headerKind":"critical", "coordinationClaim":null
         })
     );
     assert_eq!(rows[1]["headerKind"], "waiting");

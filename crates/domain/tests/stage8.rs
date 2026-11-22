@@ -30,6 +30,7 @@ fn ctx() -> ProjectionContext {
         now: now(),
         coordinator_group: COORD.to_owned(),
         warning_window: TimeDelta::minutes(60),
+        coordination_claims_enabled: false,
         itsm_url_template: Some("https://itsm.example/incidents/{sysId}".to_owned()),
     }
 }
@@ -76,6 +77,7 @@ fn row(i: &NormalizedIncident, pk: i64) -> IncidentRow {
         assigned_group_name: c.assigned_group_name.clone(),
         assigned_employee: c.assigned_employee.clone(),
         assigned_employee_login: c.assigned_employee_login.clone(),
+        coordination_claim: None,
         initiator_name: c.initiator_name.clone(),
         initiator_login: c.initiator_login.clone(),
         submit_date: c.submit_date.unwrap(),

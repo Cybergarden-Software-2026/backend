@@ -1313,11 +1313,11 @@
             }
           },
           "409": {
-            "description": "Устаревший снимок или инцидент завершён",
+            "description": "Устаревший снимок или инцидент завершён. When another coordinator has taken the incident, the current revision yields COORDINATION_ALREADY_CLAIMED and details.coordinationClaim.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/CoordinationClaimConflict"
                 }
               }
             }
@@ -2285,6 +2285,320 @@
           }
         }
       }
+    },
+    "/api/v1/incidents/{sysId}/coordination-claim": {
+      "put": {
+        "summary": "Take an incident for coordination",
+        "description": "Requires a personal account. The request body is empty.",
+        "operationId": "web_take_coordination_claim",
+        "security": [
+          {
+            "CoordinatorSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "sysId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current claim and dashboard revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoordinationClaimResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid incident sysId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/CoordinatorUnauthorized"
+          },
+          "404": {
+            "description": "The incident is missing (INCIDENT_NOT_FOUND).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "COORDINATION_CLAIM_UNAVAILABLE when the incident is outside the active coordinator queue. COORDINATION_ALREADY_CLAIMED when another coordinator owns it, with details.coordinationClaim in the response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoordinationClaimConflict"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The first source snapshot has not been accepted (SOURCE_NOT_READY).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/CoordinatorOriginForbidden"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Release an incident for coordination",
+        "description": "Requires a personal account. The request body is empty.",
+        "operationId": "web_release_coordination_claim",
+        "security": [
+          {
+            "CoordinatorSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "sysId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current claim and dashboard revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoordinationClaimResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid incident sysId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/CoordinatorUnauthorized"
+          },
+          "404": {
+            "description": "The incident is missing (INCIDENT_NOT_FOUND).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "COORDINATION_CLAIM_UNAVAILABLE when the incident is outside the active coordinator queue. COORDINATION_CLAIM_NOT_OWNED when another coordinator owns it, with details.coordinationClaim in the response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoordinationClaimConflict"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The first source snapshot has not been accepted (SOURCE_NOT_READY).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/CoordinatorOriginForbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/mobile/incidents/{sysId}/coordination-claim": {
+      "put": {
+        "summary": "Take an incident for coordination",
+        "description": "Requires a personal account. The request body is empty.",
+        "operationId": "mobile_take_coordination_claim",
+        "security": [
+          {
+            "MobileSessionBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "sysId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current claim and dashboard revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoordinationClaimResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid incident sysId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/MobileSessionUnauthorized"
+          },
+          "404": {
+            "description": "The incident is missing (INCIDENT_NOT_FOUND).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "COORDINATION_CLAIM_UNAVAILABLE when the incident is outside the active coordinator queue. COORDINATION_ALREADY_CLAIMED when another coordinator owns it, with details.coordinationClaim in the response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoordinationClaimConflict"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Personal coordinator accounts are disabled (MOBILE_ACCOUNTS_DISABLED), or the first source snapshot has not been accepted (SOURCE_NOT_READY).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Release an incident for coordination",
+        "description": "Requires a personal account. The request body is empty.",
+        "operationId": "mobile_release_coordination_claim",
+        "security": [
+          {
+            "MobileSessionBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "sysId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current claim and dashboard revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoordinationClaimResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid incident sysId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/MobileSessionUnauthorized"
+          },
+          "404": {
+            "description": "The incident is missing (INCIDENT_NOT_FOUND).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "COORDINATION_CLAIM_UNAVAILABLE when the incident is outside the active coordinator queue. COORDINATION_CLAIM_NOT_OWNED when another coordinator owns it, with details.coordinationClaim in the response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoordinationClaimConflict"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Personal coordinator accounts are disabled (MOBILE_ACCOUNTS_DISABLED), or the first source snapshot has not been accepted (SOURCE_NOT_READY).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2638,6 +2952,17 @@
               }
             ],
             "title": "Itsmurl"
+          },
+          "coordinationClaim": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CoordinationClaim"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The current coordinator reservation. Null means the incident is unclaimed."
           }
         },
         "type": "object",
@@ -3523,6 +3848,17 @@
           "updatedAt": {
             "type": "string",
             "title": "Updatedat"
+          },
+          "coordinationClaim": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CoordinationClaim"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The current coordinator reservation. Null means the incident is unclaimed."
           }
         },
         "type": "object",
@@ -3631,6 +3967,17 @@
           },
           "dashboard": {
             "$ref": "#/components/schemas/DashboardMeta"
+          },
+          "coordinationClaim": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CoordinationClaim"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The current coordinator reservation. Null means the incident is unclaimed."
           }
         },
         "additionalProperties": true,
@@ -5084,6 +5431,17 @@
               null
             ],
             "description": "At serverTime, only Assigned, WorkInProgress or Research may qualify. In precedence order: priorityId 4; waiting on the coordinator team for strictly more than 8 minutes since last assignment (fallback submitDate); or strictly less than 20% of the submitDate-to-deadline interval left. The deadline test requires registration at or before serverTime and deadline after registration. At or past deadline it applies only to an unassigned or coordinator-owned incident. Null means no header card."
+          },
+          "coordinationClaim": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CoordinationClaim"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The current coordinator reservation. Null means the incident is unclaimed."
           }
         },
         "required": [
@@ -5098,7 +5456,8 @@
           "submitDate",
           "deadline",
           "lastAssignmentToTeamDateTime",
-          "headerKind"
+          "headerKind",
+          "coordinationClaim"
         ]
       },
       "MobileIncidentSnapshot": {
@@ -5168,6 +5527,70 @@
             "$ref": "#/components/schemas/CoordinatorIdentity"
           }
         }
+      },
+      "CoordinationClaim": {
+        "type": "object",
+        "required": [
+          "login",
+          "displayName",
+          "claimedAt"
+        ],
+        "properties": {
+          "login": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "claimedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CoordinationClaimResponse": {
+        "type": "object",
+        "required": [
+          "coordinationClaim",
+          "revision"
+        ],
+        "properties": {
+          "coordinationClaim": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CoordinationClaim"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The current coordinator reservation. Null means the incident is unclaimed."
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "CoordinationClaimConflict": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ErrorResponse"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "details": {
+                "type": "object",
+                "properties": {
+                  "coordinationClaim": {
+                    "$ref": "#/components/schemas/CoordinationClaim"
+                  }
+                }
+              }
+            }
+          }
+        ]
       }
     },
     "securitySchemes": {

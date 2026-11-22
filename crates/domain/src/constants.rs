@@ -195,6 +195,7 @@ str_enum! {
         Assignment = "assignment",
         MassProblems = "mass_problems",
         TeamContacted = "team_contacted",
+        CoordinationClaim = "coordination_claim",
     }
 }
 
