@@ -268,7 +268,7 @@ sudo docker compose -p mts-incident-dashboard exec -T db sh -c \
 
 ## Мобильные push-уведомления через Firebase
 
-Проект — `underctrl-d087a`. Отправитель работает внутри процесса `api` и забирает из PostgreSQL новые события `critical.raised`. Исходящие HTTPS-соединения нужны к `oauth2.googleapis.com` и `fcm.googleapis.com`. По умолчанию `MOBILE_PUSH_ENABLED=false`. Миграция `0007` выполняется обычным `migrate`.
+Проект — `underctrl-d087a`. Отправитель работает внутри процесса `api` и забирает из PostgreSQL новые события `critical.raised`. Исходящие HTTPS-соединения нужны к `oauth2.googleapis.com` и `fcm.googleapis.com`. По умолчанию `MOBILE_PUSH_ENABLED=false`. Обычный `migrate` применяет миграции `0007` для доставки и `0008` для входа по QR. Для входа и журнала уведомлений достаточно включить личные аккаунты (`COORDINATOR_ACCOUNTS_ENABLED=true`). Firebase требуется для отправки push.
 
 1. Включите Firebase Cloud Messaging API (HTTP v1) в целевом проекте. Сервисной учётной записи сервера нужно право `cloudmessaging.messages.create` на проекте. Для отправки используется OAuth 2.0. [Настройка HTTP v1 и IAM](https://firebase.google.com/docs/cloud-messaging/send/v1-api)
 2. Доставьте JSON сервисной учётной записи через хранилище секретов на сервер. Для vserver установите его в `/etc/underctrl-backend-deploy/firebase-service-account.json`, владелец `root`, группа `65532`, права `0440`. Только сервис `api` получает read-only mount `/run/secrets/firebase-service-account`. Файл остаётся вне репозитория и Docker-образа. В Android-приложении используется его собственный клиентский `google-services.json`.

@@ -1,15 +1,16 @@
-//! One-time pairing of a notification-only device to a personal coordinator account.
+//! Sign in a mobile installation with a one-time QR code from a personal coordinator account.
 
 use axum::extract::{DefaultBodyLimit, Path, Request, State, rejection::JsonRejection};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, TimeDelta, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::coordinator_accounts::Coordinator;
@@ -22,33 +23,63 @@ pub(crate) fn routes(state: AppState) -> Router<AppState> {
         .route("/mobile/devices/{device_id}", delete(revoke_device))
         .route_layer(from_fn_with_state(state.clone(), coordinator_session::protect));
 
-    account_routes
-        .merge(
-            Router::new()
-                .route("/mobile/devices", post(register))
-                .route("/mobile/devices/current/token", put(refresh_token))
-                .route("/mobile/devices/current", delete(unregister)),
+    let notifications = Router::new()
+        .route(
+            "/mobile/notifications",
+            get(crate::notifications::list_notifications),
         )
+        .route(
+            "/mobile/notifications/{notification_id}/read",
+            put(crate::notifications::mark_read),
+        )
+        .route_layer(from_fn_with_state(state.clone(), authenticate_session));
+
+    let sessions = account_routes
+        .merge(notifications)
+        .route("/mobile/session", post(login).get(current_session).delete(logout))
+        .route("/mobile/devices/current", delete(unregister))
+        .route_layer(from_fn_with_state(state.clone(), require_accounts));
+
+    let push = Router::new()
+        .route("/mobile/devices", post(register))
+        .route("/mobile/devices/current/token", put(refresh_token))
+        .route_layer(from_fn_with_state(state, require_push));
+
+    sessions
+        .merge(push)
         .layer(DefaultBodyLimit::max(8192))
-        .route_layer(from_fn_with_state(state, require_mobile_accounts))
         .route_layer(from_fn(coordinator_session::auth_headers))
 }
 
-async fn require_mobile_accounts(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    if state.settings.mobile_push_enabled && state.settings.coordinator_accounts_enabled {
-        next.run(request).await
-    } else {
-        AppError::new(
+async fn require_accounts(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> ApiResult<Response> {
+    if !state.settings.coordinator_accounts_enabled {
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MOBILE_ACCOUNTS_DISABLED",
+            "Для мобильного входа нужны личные учётные записи.",
+        ));
+    }
+    Ok(next.run(request).await)
+}
+
+async fn require_push(State(state): State<AppState>, request: Request, next: Next) -> ApiResult<Response> {
+    if !state.settings.mobile_push_enabled || !state.settings.coordinator_accounts_enabled {
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "MOBILE_PUSH_DISABLED",
             "Мобильные уведомления отключены.",
-        )
-        .into_response()
+        ));
     }
+    Ok(next.run(request).await)
 }
 
 const PAIRING_PREFIX: &str = "ucp_";
 const DEVICE_PREFIX: &str = "ucd_";
+const SESSION_PREFIX: &str = "ucm_";
 
 fn generate_secret(prefix: &str) -> ApiResult<String> {
     let mut bytes = [0u8; 32];
@@ -78,14 +109,33 @@ fn unauthorized_device() -> AppError {
     )
 }
 
-fn device_hash(headers: &HeaderMap) -> ApiResult<[u8; 32]> {
+fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|header| header.to_str().ok())
         .and_then(|value| value.split_once(' '))
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-        .and_then(|(_, token)| secret_hash(token, DEVICE_PREFIX))
+        .map(|(_, token)| token)
+}
+
+fn device_hash(headers: &HeaderMap) -> ApiResult<[u8; 32]> {
+    bearer(headers)
+        .and_then(|token| secret_hash(token, SESSION_PREFIX).or_else(|| secret_hash(token, DEVICE_PREFIX)))
         .ok_or_else(unauthorized_device)
+}
+
+fn unauthorized_session() -> AppError {
+    AppError::new(
+        StatusCode::UNAUTHORIZED,
+        "MOBILE_SESSION_UNAUTHORIZED",
+        "Требуется вход по QR-коду.",
+    )
+}
+
+fn session_hash(headers: &HeaderMap) -> ApiResult<[u8; 32]> {
+    bearer(headers)
+        .and_then(|token| secret_hash(token, SESSION_PREFIX))
+        .ok_or_else(unauthorized_session)
 }
 
 fn token_in_use() -> AppError {
@@ -143,11 +193,142 @@ async fn issue_pairing(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Platform {
+    #[default]
     Android,
     Web,
+}
+
+impl Platform {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Android => "android",
+            Self::Web => "web",
+        }
+    }
+}
+
+// The caller commits only after successfully registering or signing in the installation.
+async fn claim_pairing(
+    state: &AppState,
+    code: &str,
+) -> ApiResult<(Transaction<'static, Postgres>, Coordinator)> {
+    let code_hash = secret_hash(code, PAIRING_PREFIX).ok_or_else(invalid_pairing)?;
+    let mut tx = state.pool.begin().await?;
+    // Take the account lock before touching its pairing or devices, as account disablement does.
+    let owner: (String, String) = sqlx::query_as(
+        "SELECT a.login, a.display_name FROM coordinator_accounts a JOIN mobile_pairings p ON p.account_login = a.login
+         WHERE a.disabled_at IS NULL AND p.code_hash = $1 AND p.expires_at > $2 FOR SHARE OF a",
+    )
+    .bind(code_hash.as_slice())
+    .bind((state.clock)())
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(invalid_pairing)?;
+    // A concurrent claim or replacement can win after the lookup. Consume the exact code once.
+    let consumed = sqlx::query(
+        "DELETE FROM mobile_pairings WHERE account_login = $1 AND code_hash = $2 AND expires_at > $3",
+    )
+    .bind(&owner.0)
+    .bind(code_hash.as_slice())
+    .bind((state.clock)())
+    .execute(&mut *tx)
+    .await?;
+    if consumed.rows_affected() == 0 {
+        return Err(invalid_pairing());
+    }
+    Ok((tx, owner.into()))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Login {
+    code: String,
+    device_id: String,
+    #[serde(default)]
+    platform: Platform,
+}
+
+async fn login(
+    State(state): State<AppState>,
+    body: Result<Json<Login>, JsonRejection>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let Json(input) = body.map_err(json_error)?;
+    if !(1..=128).contains(&input.device_id.len()) || !input.device_id.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(AppError::validation(
+            "deviceId должен содержать от 1 до 128 печатных ASCII-символов без пробелов.",
+        ));
+    }
+    let (mut tx, owner) = claim_pairing(&state, &input.code).await?;
+    let token = generate_secret(SESSION_PREFIX)?;
+    let hash = Sha256::digest(token.as_bytes());
+    // Only the account identified by the QR can rotate this installation's bearer.
+    let result = sqlx::query(
+        "INSERT INTO mobile_devices (client_device_id, account_login, platform, secret_hash)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (client_device_id) DO UPDATE SET secret_hash = EXCLUDED.secret_hash
+         WHERE mobile_devices.account_login = EXCLUDED.account_login",
+    )
+    .bind(&input.device_id)
+    .bind(&owner.login)
+    .bind(input.platform.as_str())
+    .bind(&hash[..])
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::conflict("Устройство уже привязано к другому аккаунту.")
+            .with_code("MOBILE_DEVICE_IN_USE"));
+    }
+    tx.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "token": token, "tokenType": "Bearer", "deviceId": input.device_id, "user": owner,
+        })),
+    ))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileSession {
+    device_id: String,
+    user: Coordinator,
+}
+
+async fn active_session(state: &AppState, headers: &HeaderMap) -> ApiResult<MobileSession> {
+    let hash = session_hash(headers)?;
+    let (device_id, login, display_name): (String, String, String) = sqlx::query_as(
+        "SELECT d.client_device_id, a.login, a.display_name
+         FROM mobile_devices d JOIN coordinator_accounts a ON a.login = d.account_login
+         WHERE d.secret_hash = $1 AND d.client_device_id IS NOT NULL AND a.disabled_at IS NULL",
+    )
+    .bind(hash.as_slice())
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(unauthorized_session)?;
+    Ok(MobileSession {
+        device_id,
+        user: (login, display_name).into(),
+    })
+}
+
+async fn current_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<MobileSession>> {
+    Ok(Json(active_session(&state, &headers).await?))
+}
+
+async fn authenticate_session(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> ApiResult<Response> {
+    let session = active_session(&state, request.headers()).await?;
+    request.extensions_mut().insert(session.user);
+    Ok(next.run(request).await)
 }
 
 #[derive(Default, Deserialize)]
@@ -183,44 +364,17 @@ async fn register(
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let Json(input) = body.map_err(json_error)?;
     valid_fcm_token(&input.fcm_token)?;
-    let code_hash = secret_hash(&input.code, PAIRING_PREFIX).ok_or_else(invalid_pairing)?;
-    let mut tx = state.pool.begin().await?;
-    // Take the account lock before touching its pairing or devices, as account disablement does.
-    let login: String = sqlx::query_scalar(
-        "SELECT a.login FROM coordinator_accounts a JOIN mobile_pairings p ON p.account_login = a.login
-         WHERE a.disabled_at IS NULL AND p.code_hash = $1 AND p.expires_at > $2 FOR SHARE OF a",
-    )
-    .bind(code_hash.as_slice())
-    .bind((state.clock)())
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(invalid_pairing)?;
-    // A concurrent claim or replacement can win after the lookup. Consume the exact code once.
-    let consumed = sqlx::query(
-        "DELETE FROM mobile_pairings WHERE account_login = $1 AND code_hash = $2 AND expires_at > $3",
-    )
-    .bind(&login)
-    .bind(code_hash.as_slice())
-    .bind((state.clock)())
-    .execute(&mut *tx)
-    .await?;
-    if consumed.rows_affected() == 0 {
-        return Err(invalid_pairing());
-    }
+    let (mut tx, owner) = claim_pairing(&state, &input.code).await?;
     let token = generate_secret(DEVICE_PREFIX)?;
     let hash = Sha256::digest(token.as_bytes());
     let id = Uuid::new_v4();
-    let platform = match input.platform {
-        Platform::Android => "android",
-        Platform::Web => "web",
-    };
     let result = sqlx::query(
         "INSERT INTO mobile_devices(id, account_login, platform, fcm_token, secret_hash, fcm_target_type)
          VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (fcm_token) DO NOTHING",
     )
     .bind(id)
-    .bind(login)
-    .bind(platform)
+    .bind(owner.login)
+    .bind(input.platform.as_str())
     .bind(input.fcm_token)
     .bind(&hash[..])
     .bind(input.fcm_target_type.as_str())
@@ -274,8 +428,7 @@ async fn refresh_token(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn unregister(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<StatusCode> {
-    let hash = device_hash(&headers)?;
+async fn remove_registration(state: &AppState, hash: &[u8; 32]) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
         "DELETE FROM mobile_devices d USING coordinator_accounts a
          WHERE d.secret_hash = $1 AND a.login = d.account_login AND a.disabled_at IS NULL",
@@ -283,7 +436,18 @@ async fn unregister(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     .bind(hash.as_slice())
     .execute(&state.pool)
     .await?;
-    if result.rows_affected() == 0 {
+    Ok(result.rows_affected() > 0)
+}
+
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<StatusCode> {
+    if !remove_registration(&state, &session_hash(&headers)?).await? {
+        return Err(unauthorized_session());
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unregister(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<StatusCode> {
+    if !remove_registration(&state, &device_hash(&headers)?).await? {
         return Err(unauthorized_device());
     }
     Ok(StatusCode::NO_CONTENT)

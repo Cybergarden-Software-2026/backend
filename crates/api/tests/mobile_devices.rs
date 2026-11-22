@@ -19,6 +19,8 @@ const PAIRINGS: &str = "/api/v1/mobile/pairings";
 const DEVICES: &str = "/api/v1/mobile/devices";
 const CURRENT: &str = "/api/v1/mobile/devices/current";
 const TOKEN: &str = "/api/v1/mobile/devices/current/token";
+const SESSION: &str = "/api/v1/mobile/session";
+const INBOX: &str = "/api/v1/mobile/notifications";
 const ENABLED: &[(&str, &str)] = &[
     ("COORDINATOR_ACCOUNTS_ENABLED", "true"),
     ("MOBILE_PUSH_ENABLED", "true"),
@@ -108,30 +110,52 @@ async fn claim(app: &Router, code: &str, token: &str) -> Response {
     .await
 }
 
+async fn login_device(app: &Router, code: &str, device_id: &str) -> Response {
+    call(
+        app,
+        "POST",
+        SESSION,
+        &[],
+        Some(json!({"code":code, "deviceId":device_id})),
+    )
+    .await
+}
+
 #[tokio::test]
-async fn mobile_routes_are_closed_without_individual_accounts_and_explicit_enablement() {
-    for extra in [vec![("COORDINATOR_ACCOUNTS_ENABLED", "true")], vec![]] {
-        let settings = Settings::from_vars(
-            extra
-                .into_iter()
-                .chain([("DATABASE_URL", "postgresql://localhost/test")]),
-        )
+async fn login_requires_personal_accounts_and_fcm_registration_requires_push() {
+    for accounts in ["true", "false"] {
+        let settings = Settings::from_vars([
+            ("COORDINATOR_ACCOUNTS_ENABLED", accounts),
+            ("DATABASE_URL", "postgresql://localhost/test"),
+        ])
         .unwrap();
         let pool = dashboard_store::connect_lazy(&settings).unwrap();
         let app = router(AppState::new(Arc::new(settings), pool));
-        for (method, path) in [
-            ("POST", PAIRINGS),
-            ("GET", DEVICES),
-            ("POST", DEVICES),
-            ("PUT", TOKEN),
-            ("DELETE", CURRENT),
-        ] {
+        for (method, path) in [("POST", DEVICES), ("PUT", TOKEN)] {
             let body = read(
                 call(&app, method, path, &[], None).await,
                 StatusCode::SERVICE_UNAVAILABLE,
             )
             .await;
             assert_eq!(body["code"], "MOBILE_PUSH_DISABLED");
+        }
+        if accounts == "false" {
+            for (method, path) in [
+                ("POST", PAIRINGS),
+                ("GET", DEVICES),
+                ("DELETE", CURRENT),
+                ("POST", SESSION),
+                ("GET", SESSION),
+                ("DELETE", SESSION),
+                ("GET", INBOX),
+            ] {
+                let body = read(
+                    call(&app, method, path, &[], None).await,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+                .await;
+                assert_eq!(body["code"], "MOBILE_ACCOUNTS_DISABLED");
+            }
         }
     }
 }
@@ -292,7 +316,14 @@ async fn mobile_credentials_are_device_scoped_and_owner_controls_revocation() {
     .await;
     assert_eq!(items["items"], json!([]));
 
-    for (method, path) in [("GET", DEVICES), ("POST", PAIRINGS), ("GET", "/api/v1/snapshot")] {
+    for (method, path) in [
+        ("GET", DEVICES),
+        ("POST", PAIRINGS),
+        ("GET", "/api/v1/snapshot"),
+        ("GET", SESSION),
+        ("GET", INBOX),
+        ("DELETE", SESSION),
+    ] {
         assert_eq!(
             call(&app, method, path, &[("authorization", &bearer)], None)
                 .await
@@ -400,6 +431,210 @@ async fn mobile_credentials_are_device_scoped_and_owner_controls_revocation() {
     );
     assert_eq!(
         call(&app, "DELETE", CURRENT, &[("authorization", &new_bearer)], None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    env.finish().await;
+}
+
+#[tokio::test]
+async fn qr_login_without_firebase_authenticates_the_account_and_its_notification_reads() {
+    let Some(env) = Env::with_vars(&[("COORDINATOR_ACCOUNTS_ENABLED", "true")]).await else {
+        return;
+    };
+    let app = router(AppState::with_clock(
+        env.settings.clone(),
+        env.pool().clone(),
+        env.clock.as_clock(),
+    ));
+    let alice = owner(&env, &app, "alice").await;
+    let bob = owner(&env, &app, "bob").await;
+    sqlx::query("UPDATE coordinator_accounts SET display_name = 'Alice Example' WHERE login = 'alice'")
+        .execute(env.pool())
+        .await
+        .unwrap();
+    let code = pairing(&app, &alice).await;
+    for device_id in ["", "one two", "тест", &"a".repeat(129)] {
+        let body = read(
+            login_device(&app, &code, device_id).await,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_eq!(body["code"], "VALIDATION_ERROR");
+    }
+    let device_id = "a".repeat(128);
+    let session = read(login_device(&app, &code, &device_id).await, StatusCode::CREATED).await;
+    let token = session["token"].as_str().unwrap();
+    let user = json!({"login":"alice","displayName":"Alice Example"});
+    assert!(token.starts_with("ucm_"));
+    assert_eq!(
+        session,
+        json!({"token":token,"tokenType":"Bearer","deviceId":device_id,"user":user})
+    );
+    let bearer = format!("Bearer {token}");
+    let as_alice = [("authorization", bearer.as_str()), ("x-user-id", "bob")];
+    let current = read(call(&app, "GET", SESSION, &as_alice, None).await, StatusCode::OK).await;
+    assert_eq!(current, json!({"deviceId":device_id,"user":user}));
+    assert_eq!(
+        env.string("SELECT platform FROM mobile_devices").await.as_deref(),
+        Some("android")
+    );
+    assert_eq!(env.i64("SELECT count(fcm_token) FROM mobile_devices").await, 0);
+    let repeated = read(
+        login_device(&app, &code, &device_id).await,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    assert_eq!(repeated["code"], "MOBILE_PAIRING_INVALID");
+
+    let notification_id: i64 = sqlx::query_scalar(
+        "INSERT INTO notifications(type, title, dedup_key) VALUES ('critical.raised', 'Critical', 'test-mobile') RETURNING id"
+    ).fetch_one(env.pool()).await.unwrap();
+    let unread = read(call(&app, "GET", INBOX, &as_alice, None).await, StatusCode::OK).await;
+    assert_eq!(unread["unreadCount"], 1);
+    assert_eq!(unread["items"][0]["id"], notification_id);
+    let mark = format!("{INBOX}/{notification_id}/read");
+    assert_eq!(
+        call(&app, "PUT", &mark, &as_alice, None).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    for (cookie, expected) in [(&alice, true), (&bob, false)] {
+        let page = read(
+            call(&app, "GET", "/api/v1/notifications", &[("cookie", cookie)], None).await,
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(page["items"][0]["isRead"], expected);
+    }
+    assert_eq!(
+        call(&app, "GET", DEVICES, &as_alice, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&app, "DELETE", SESSION, &as_alice, None).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    for path in [SESSION, INBOX] {
+        let unauthorized = read(
+            call(&app, "GET", path, &as_alice, None).await,
+            StatusCode::UNAUTHORIZED,
+        )
+        .await;
+        assert_eq!(unauthorized["code"], "MOBILE_SESSION_UNAUTHORIZED");
+    }
+    env.finish().await;
+}
+
+#[tokio::test]
+async fn fresh_qr_rotates_the_same_installation_and_preserves_push_without_cross_account_takeover() {
+    let Some(env) = Env::with_vars(ENABLED).await else {
+        return;
+    };
+    let app = router(AppState::with_clock(
+        env.settings.clone(),
+        env.pool().clone(),
+        env.clock.as_clock(),
+    ));
+    let alice = owner(&env, &app, "alice").await;
+    let bob = owner(&env, &app, "bob").await;
+    let device_id = "android:fixture-1";
+    let code = pairing(&app, &alice).await;
+    let (first, second) = tokio::join!(
+        login_device(&app, &code, device_id),
+        login_device(&app, &code, device_id)
+    );
+    let (success, replay) = if first.status() == StatusCode::CREATED {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let session = read(success, StatusCode::CREATED).await;
+    assert_eq!(
+        read(replay, StatusCode::UNAUTHORIZED).await["code"],
+        "MOBILE_PAIRING_INVALID"
+    );
+    let original = format!("Bearer {}", session["token"].as_str().unwrap());
+    let as_first = [("authorization", original.as_str())];
+    assert_eq!(
+        call(
+            &app,
+            "PUT",
+            TOKEN,
+            &as_first,
+            Some(json!({"fcmToken":"registered","fcmTargetType":"fid"}))
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let alice_devices = read(
+        call(&app, "GET", DEVICES, &[("cookie", &alice)], None).await,
+        StatusCode::OK,
+    )
+    .await;
+    let revoke = format!(
+        "{DEVICES}/{}",
+        alice_devices["items"][0]["deviceId"].as_str().unwrap()
+    );
+
+    let bob_code = pairing(&app, &bob).await;
+    assert_eq!(
+        read(
+            login_device(&app, &bob_code, device_id).await,
+            StatusCode::CONFLICT
+        )
+        .await["code"],
+        "MOBILE_DEVICE_IN_USE"
+    );
+    let fresh = pairing(&app, &alice).await;
+    let rotated = read(login_device(&app, &fresh, device_id).await, StatusCode::CREATED).await;
+    let updated = format!("Bearer {}", rotated["token"].as_str().unwrap());
+    assert_ne!(updated, original);
+    assert_eq!(
+        call(&app, "GET", SESSION, &as_first, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&app, "DELETE", CURRENT, &as_first, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(env.i64("SELECT count(*) FROM mobile_devices").await, 1);
+    assert_eq!(
+        env.string("SELECT fcm_token FROM mobile_devices WHERE fcm_target_type='fid'")
+            .await
+            .as_deref(),
+        Some("registered")
+    );
+    assert_eq!(
+        call(&app, "DELETE", &revoke, &[("cookie", &bob)], None)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&app, "DELETE", &revoke, &[("cookie", &alice)], None)
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(&app, "GET", SESSION, &[("authorization", &updated)], None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let reassigned = read(
+        login_device(&app, &bob_code, device_id).await,
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(reassigned["user"]["login"], "bob");
+    assert_eq!(env.i64("SELECT count(fcm_token) FROM mobile_devices").await, 0);
+    let bob_token = format!("Bearer {}", reassigned["token"].as_str().unwrap());
+    assert!(disable_account(env.pool(), "bob").await.unwrap());
+    assert_eq!(
+        call(&app, "GET", INBOX, &[("authorization", &bob_token)], None)
             .await
             .status(),
         StatusCode::UNAUTHORIZED

@@ -3,7 +3,7 @@
   "info": {
     "title": "Dashboard API",
     "version": "1.0.0",
-    "description": "When coordinator access is configured, dashboard API operations require a valid coordinator session. Health, documentation and the session endpoint are public. When access is disabled, dashboard operations require no session. Mobile push requires enabled personal coordinator accounts and MOBILE_PUSH_ENABLED. Owner operations use the coordinator cookie. Device registration exchanges the one-time QR credential in JSON. Subsequent device operations use a device-scoped bearer. Mobile responses specify Cache-Control: no-store."
+    "description": "When coordinator access is configured, dashboard API operations require a valid coordinator session. Health, documentation and the session endpoint are public. When access is disabled, dashboard operations require no session. Mobile QR sign-in requires individual coordinator accounts. The coordinator cookie authorizes pairing codes and owner operations. Exchange the QR code and a client-generated deviceId for a mobile session bearer. The legacy push-only bearer has its own restricted operations. Set MOBILE_PUSH_ENABLED to enable FCM registration and delivery. Mobile responses specify Cache-Control: no-store."
   },
   "security": [
     {
@@ -1641,7 +1641,7 @@
             "$ref": "#/components/responses/MobileInternalError"
           },
           "503": {
-            "$ref": "#/components/responses/MobilePushDisabled"
+            "$ref": "#/components/responses/MobileAccountsDisabled"
           }
         }
       }
@@ -1677,7 +1677,7 @@
             "$ref": "#/components/responses/MobileInternalError"
           },
           "503": {
-            "$ref": "#/components/responses/MobilePushDisabled"
+            "$ref": "#/components/responses/MobileAccountsDisabled"
           }
         }
       },
@@ -1687,7 +1687,7 @@
         ],
         "operationId": "register_mobile_device",
         "summary": "Exchange a QR code for a device registration",
-        "description": "Send the scanned code with the client platform and FCM-registered identifier. The server consumes the code and registers the device atomically. A target conflict preserves the code until its original expiry. Save deviceToken from the response in secure client storage.",
+        "description": "Send the scanned code with the client platform and FCM-registered identifier. The server consumes the code and registers the device atomically. A target conflict preserves the code until its original expiry. Save deviceToken from the response in secure client storage. This legacy flow issues a push-management credential. Use POST /mobile/session for account sign-in.",
         "security": [],
         "requestBody": {
           "required": true,
@@ -1745,6 +1745,9 @@
         "description": "Call when Firebase supplies a new FCM registration token or registered installation ID. Send the current identifier and target type together. Repeating the same update is safe.",
         "security": [
           {
+            "MobileSessionBearer": []
+          },
+          {
             "MobileDeviceBearer": []
           }
         ],
@@ -1797,6 +1800,9 @@
         "description": "The device bearer revokes its own registration and pending deliveries.",
         "security": [
           {
+            "MobileSessionBearer": []
+          },
+          {
             "MobileDeviceBearer": []
           }
         ],
@@ -1811,7 +1817,7 @@
             "$ref": "#/components/responses/MobileInternalError"
           },
           "503": {
-            "$ref": "#/components/responses/MobilePushDisabled"
+            "$ref": "#/components/responses/MobileAccountsDisabled"
           }
         }
       }
@@ -1834,7 +1840,7 @@
             "name": "device_id",
             "in": "path",
             "required": true,
-            "description": "Device ID returned by registration or the owner’s device list.",
+            "description": "Server registration UUID returned by GET /mobile/devices.",
             "schema": {
               "type": "string",
               "format": "uuid"
@@ -1861,7 +1867,273 @@
             "$ref": "#/components/responses/MobileInternalError"
           },
           "503": {
-            "$ref": "#/components/responses/MobilePushDisabled"
+            "$ref": "#/components/responses/MobileAccountsDisabled"
+          }
+        }
+      }
+    },
+    "/api/v1/mobile/session": {
+      "post": {
+        "tags": [
+          "Mobile account"
+        ],
+        "operationId": "login_mobile_session",
+        "summary": "Sign in with a QR code and installation ID",
+        "description": "Works with personal accounts even before FCM is configured. A successful exchange consumes the code and associates the installation with the coordinator who issued it. Repeating sign-in with a fresh code from the same owner rotates the bearer and retains the FCM registration. A failed conflict leaves the code usable until expiry.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "description": "UTF-8 JSON, up to 8192 bytes. The default platform is android.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MobileLogin"
+              },
+              "example": {
+                "code": "ucp_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "deviceId": "b509dc41-edee-4896-8aca-97cd1c598293"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Mobile account and newly issued bearer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileLoginResult"
+                },
+                "example": {
+                  "token": "ucm_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                  "tokenType": "Bearer",
+                  "deviceId": "b509dc41-edee-4896-8aca-97cd1c598293",
+                  "user": {
+                    "login": "shift-a",
+                    "displayName": "Дежурный координатор"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/MobileValidation"
+          },
+          "401": {
+            "$ref": "#/components/responses/MobilePairingInvalid"
+          },
+          "409": {
+            "$ref": "#/components/responses/MobileDeviceInUse"
+          },
+          "413": {
+            "$ref": "#/components/responses/MobilePayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/MobileJsonRequired"
+          },
+          "500": {
+            "$ref": "#/components/responses/MobileInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/MobileAccountsDisabled"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Mobile account"
+        ],
+        "operationId": "get_mobile_session",
+        "summary": "Read the signed-in mobile account",
+        "description": "Returns the account bound to this bearer and the client installation ID.",
+        "security": [
+          {
+            "MobileSessionBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The authenticated account and installation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileSession"
+                },
+                "example": {
+                  "deviceId": "b509dc41-edee-4896-8aca-97cd1c598293",
+                  "user": {
+                    "login": "shift-a",
+                    "displayName": "Дежурный координатор"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/MobileSessionUnauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/MobileInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/MobileAccountsDisabled"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Mobile account"
+        ],
+        "operationId": "logout_mobile_session",
+        "summary": "Sign out and unlink this installation",
+        "description": "Revokes this bearer, the device push registration and pending deliveries.",
+        "security": [
+          {
+            "MobileSessionBearer": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Session revoked. Empty response body."
+          },
+          "401": {
+            "$ref": "#/components/responses/MobileSessionUnauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/MobileInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/MobileAccountsDisabled"
+          }
+        }
+      }
+    },
+    "/api/v1/mobile/notifications": {
+      "get": {
+        "tags": [
+          "Mobile account"
+        ],
+        "operationId": "list_mobile_account_notifications",
+        "summary": "List notifications with account read state",
+        "description": "Returns dashboard notifications newest first. The authenticated account determines read state. Pass nextCursor as cursor to fetch older items.",
+        "security": [
+          {
+            "MobileSessionBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Notifications with account read state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid limit or cursor (VALIDATION_ERROR or INVALID_CURSOR).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/MobileSessionUnauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/MobileInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/MobileAccountsDisabled"
+          }
+        }
+      }
+    },
+    "/api/v1/mobile/notifications/{notification_id}/read": {
+      "put": {
+        "tags": [
+          "Mobile account"
+        ],
+        "operationId": "mark_mobile_account_notification_read",
+        "summary": "Mark a notification read",
+        "description": "Read state is shared with the same coordinator’s web session. The operation is idempotent.",
+        "security": [
+          {
+            "MobileSessionBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "notification_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "title": "Notification Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Marked read. Empty response body."
+          },
+          "400": {
+            "$ref": "#/components/responses/MobileValidation"
+          },
+          "404": {
+            "description": "Notification not found (NOTIFICATION_NOT_FOUND).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/MobileSessionUnauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/MobileInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/MobileAccountsDisabled"
           }
         }
       }
@@ -4423,7 +4695,8 @@
         "properties": {
           "deviceId": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "Server-generated registration UUID used by the owner to revoke this device. The client supplies its installation ID separately on POST /mobile/session."
           },
           "deviceToken": {
             "type": "string",
@@ -4460,7 +4733,8 @@
         "properties": {
           "deviceId": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "Server-generated registration UUID used by the owner to revoke this device. The client supplies its installation ID separately on POST /mobile/session."
           },
           "platform": {
             "$ref": "#/components/schemas/MobilePlatform"
@@ -4497,6 +4771,76 @@
         ],
         "default": "token",
         "description": "Select fid for a Firebase Installation ID reported by the FCM registration callback. The default token target supports clients using the legacy registration token."
+      },
+      "MobileClientDeviceId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[!-~]+$",
+        "description": "Stable, opaque client-generated installation ID. Send this case-sensitive value and the one-time code when signing in. It is separate from the FCM identifier and the server-generated registration UUID."
+      },
+      "MobileLogin": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "deviceId"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/MobilePairingCode"
+          },
+          "deviceId": {
+            "$ref": "#/components/schemas/MobileClientDeviceId"
+          },
+          "platform": {
+            "$ref": "#/components/schemas/MobilePlatform",
+            "default": "android"
+          }
+        }
+      },
+      "MobileSession": {
+        "type": "object",
+        "required": [
+          "deviceId",
+          "user"
+        ],
+        "properties": {
+          "deviceId": {
+            "$ref": "#/components/schemas/MobileClientDeviceId"
+          },
+          "user": {
+            "$ref": "#/components/schemas/CoordinatorIdentity"
+          }
+        }
+      },
+      "MobileLoginResult": {
+        "type": "object",
+        "required": [
+          "token",
+          "tokenType",
+          "deviceId",
+          "user"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "pattern": "^ucm_[0-9a-f]{64}$",
+            "minLength": 68,
+            "maxLength": 68,
+            "description": "Opaque mobile account bearer returned once at sign-in."
+          },
+          "tokenType": {
+            "type": "string",
+            "const": "Bearer"
+          },
+          "deviceId": {
+            "$ref": "#/components/schemas/MobileClientDeviceId"
+          },
+          "user": {
+            "$ref": "#/components/schemas/CoordinatorIdentity"
+          }
+        }
       }
     },
     "securitySchemes": {
@@ -4510,6 +4854,12 @@
         "scheme": "bearer",
         "bearerFormat": "opaque",
         "description": "Device token issued by POST /api/v1/mobile/devices. Scoped to updating the registration token and unregistering this device."
+      },
+      "MobileSessionBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque",
+        "description": "Account session token issued by POST /api/v1/mobile/session. Store securely and send in Authorization: Bearer <token>. Valid until logout, owner revocation, account disablement or another successful QR sign-in for this installation. Grants mobile account and registration operations only."
       }
     },
     "responses": {
@@ -4615,6 +4965,36 @@
       },
       "MobileInternalError": {
         "description": "Internal processing or database error (INTERNAL_ERROR).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "MobileAccountsDisabled": {
+        "description": "Individual coordinator accounts are disabled (MOBILE_ACCOUNTS_DISABLED).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "MobileSessionUnauthorized": {
+        "description": "The mobile account bearer is missing, invalid, revoked or belongs to a disabled account (MOBILE_SESSION_UNAUTHORIZED). Legacy push-management credentials cannot authenticate an account.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "MobileDeviceInUse": {
+        "description": "The client installation ID is registered to another account (MOBILE_DEVICE_IN_USE). Its owner or device must unlink it first. The QR code remains valid until its original expiry.",
         "content": {
           "application/json": {
             "schema": {
