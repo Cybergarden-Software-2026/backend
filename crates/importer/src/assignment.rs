@@ -117,6 +117,10 @@ pub async fn record_assignment(
     let payload = json!({"schemaVersion": 1, "sysId": current.sys_id, "team": team, "actor": actor});
     let revision = repo::new_dashboard_event(conn, DashboardEventReason::Assignment, &payload, now).await?;
     crate::service::apply_plan(conn, &plan, revision, now).await?;
+    if settings.llm_enabled {
+        let spec = dashboard_store::analysis_repo::JobSpec::summary(settings);
+        dashboard_store::analysis_repo::enqueue_incident(conn, &spec, current.pk).await?;
+    }
     sqlx::query("UPDATE import_state SET last_change_at = $1, updated_at = $1 WHERE id = $2")
         .bind(now)
         .bind(repo::IMPORT_STATE_ID)

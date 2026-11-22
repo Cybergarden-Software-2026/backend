@@ -8,8 +8,9 @@ use dashboard_domain::analysis::{
     CandidateEvidence, TeamCandidate, candidate_teams, needs_coordinator_routing,
 };
 use dashboard_domain::constants::NormalizedState;
+use dashboard_domain::llm::SummaryEvent;
 use dashboard_domain::projection::{IncidentRow, format_utc};
-use dashboard_store::analysis_repo::{self, JobSpec};
+use dashboard_store::analysis_repo::{self, JobSpec, SummaryStatus};
 use serde_json::{Value, json};
 
 use crate::AppState;
@@ -55,17 +56,107 @@ pub async fn get(State(state): State<AppState>, OriginalUri(uri): OriginalUri) -
     );
     if state.settings.llm_enabled {
         let spec = JobSpec::summary(&state.settings);
-        if let Some(stored) = analysis_repo::current_result(&mut loaded.tx, &spec, item.pk).await? {
-            apply_llm(
+        match analysis_repo::summary_status(&mut loaded.tx, &spec, item.pk).await? {
+            SummaryStatus::Ready(stored) => apply_llm(
                 &mut analysis,
                 &stored.result,
                 stored.finished_at,
                 &candidates,
                 coordinator_routing,
-            );
+            ),
+            SummaryStatus::Pending => analysis["summaryPending"] = json!(true),
+            SummaryStatus::Unavailable => {}
         }
     }
+    if analysis.get("summary").is_none() {
+        let history = analysis_repo::summary_history(&mut loaded.tx, item.pk).await?;
+        analysis["summary"] = json!(incident_brief(item, &history));
+    }
     Ok(PyJson(analysis))
+}
+
+/// Короткая выдержка из одного поля. Многоточие отличает обрезанный текст от полной записи.
+fn excerpt(value: &str) -> String {
+    const LIMIT: usize = 150;
+    let text = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= LIMIT {
+        return text;
+    }
+    let prefix: String = text.chars().take(LIMIT - 1).collect();
+    let clipped = prefix
+        .rsplit_once(' ')
+        .map(|(whole, _)| whole)
+        .filter(|whole| whole.chars().count() > 100)
+        .unwrap_or(&prefix);
+    format!("{}…", clipped.trim_end())
+}
+
+fn incident_brief(item: &IncidentRow, history: &[SummaryEvent]) -> String {
+    let mut problem = [&item.short_description, &item.description, &item.header]
+        .into_iter()
+        .filter_map(|field| field.as_deref())
+        .find(|text| !text.trim().is_empty())
+        .map_or_else(|| "Описание проблемы пока отсутствует.".to_owned(), excerpt);
+    if !problem.ends_with(['.', '!', '?', '…']) {
+        problem.push('.');
+    }
+    let state = state_of(item);
+    let solution = item
+        .solution
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| {
+            format!(
+                "В поле решения указано «{}».",
+                excerpt(text).trim_end_matches('.')
+            )
+        })
+        .or_else(|| {
+            let previous = history
+                .iter()
+                .rev()
+                .flat_map(|event| [&event.solution, &event.previous_solution])
+                .filter_map(|field| field.as_deref())
+                .find(|text| !text.trim().is_empty())?;
+            Some(format!(
+                "Ранее в карточке указали «{}».",
+                excerpt(previous).trim_end_matches('.')
+            ))
+        });
+    let reopened = solution.is_some() && history.iter().any(|event| event.reopened);
+    let action = solution.or_else(|| {
+        history.iter().rev().find_map(|event| {
+            if event.reopened {
+                return Some("Инцидент вернули в работу.".to_owned());
+            }
+            event
+                .team
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .map(|team| format!("Инцидент передали команде «{}».", excerpt(team)))
+        })
+    });
+    let action = action.unwrap_or_else(|| {
+        item.assigned_group_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .map_or_else(
+                || "Выполненные действия пока не описаны.".to_owned(),
+                |team| format!("Карточка назначена группе «{}».", excerpt(team)),
+            )
+    });
+    let outcome = match state {
+        NormalizedState::Assigned | NormalizedState::WorkInProgress if reopened => {
+            "Инцидент снова в работе, результат пока не подтверждён."
+        }
+        NormalizedState::Assigned => "Инцидент назначен, результат пока не подтверждён.",
+        NormalizedState::WorkInProgress => "Работа продолжается, результат пока не подтверждён.",
+        NormalizedState::Research => "Идёт исследование причин.",
+        NormalizedState::Resolved => "В карточке инцидент отмечен как решённый.",
+        NormalizedState::Closed => "Инцидент закрыт.",
+        NormalizedState::Unknown => "Текущий статус не определён.",
+    };
+    format!("{problem} {action} {outcome}")
 }
 
 fn candidate_json(candidate: &TeamCandidate<'_>, llm: bool) -> Value {
@@ -160,11 +251,6 @@ fn analyze(
             "В снимке недостаточно сопоставимых завершённых случаев для рекомендации команды."
         });
     }
-    let summary = match (&item.short_description, &item.description) {
-        (Some(short), _) if !short.is_empty() => short.clone(),
-        (_, Some(description)) if !description.is_empty() => description.chars().take(420).collect(),
-        _ => item.header.clone().unwrap_or_default(),
-    };
     let status = match state {
         NormalizedState::Assigned => "Назначен",
         NormalizedState::WorkInProgress => "Выполняется",
@@ -178,7 +264,6 @@ fn analyze(
         "revision": revision,
         "generatedAt": format_utc(&now),
         "provider": "rules",
-        "summary": summary,
         "facts": [
             {"label": "Продукт", "value": item.product_name.as_deref().unwrap_or_default()},
             {"label": "Сервис", "value": item.service.as_deref().unwrap_or_default()},

@@ -1,25 +1,74 @@
 //! Очередь ИИ-задач в `analysis_jobs`: выжимки карточек (`summary`) и проверка групп массовых
 //! сбоев (`cluster`, миграция 0004).
 //!
-//! Актуальность задачи определяется не номером ревизии, а входом: `input` — снимок полей реестра,
-//! из которых строится выжимка ([`INPUT_SQL`]). Поэтому смена команды или статуса не вызывает
-//! повторную генерацию, а правка описания сразу делает старый результат неактуальным.
-//! `incident_revision` хранит ревизию записи на момент постановки (уникальный ключ схемы).
+//! Для выжимки вход хранит текущие факты и номер последнего существенного события карточки.
+//! Реестр событий дописывается вместе с карточкой, поэтому переход обратно к прежнему статусу
+//! отличается от старого состояния даже при совпадении всех текущих полей.
 
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use dashboard_domain::llm::{SUMMARY_HISTORY_LIMIT, SummaryEvent};
 use serde_json::Value;
 use sqlx::{PgConnection, Row};
 
-/// Поля инцидента `i` для задачи `summary` (ключи — как у `dashboard_domain::llm::SummaryInput`).
-pub const INPUT_SQL: &str = "jsonb_build_object(\
-'header', i.header, \
-'shortDescription', i.short_description, \
-'description', i.description, \
-'product', i.product_name, \
-'service', i.service, \
-'scenario', i.scenario_name)";
+const STATE_CHANGED: &str = "fields && ARRAY['state', 'stateEnum', 'stateId']";
+const MATERIAL_CHANGE: &str =
+    "fields && ARRAY['state', 'stateEnum', 'stateId', 'assignedGroupName', 'solution']";
+
+/// Поиск по уникальному индексу (incident_pk, incident_revision), только для этой карточки.
+/// Полные предыдущие версии записей и произвольные поля ITSM не передаются в модель.
+pub async fn summary_history(
+    conn: &mut PgConnection,
+    incident_pk: i64,
+) -> Result<Vec<SummaryEvent>, sqlx::Error> {
+    let sql = format!(
+        r#"SELECT at, 'reopened' = ANY(types) AS reopened,
+                  CASE WHEN {STATE_CHANGED} THEN left(coalesce(nullif(trim("current"->>'stateEnum'), ''),
+                      "current"->>'stateId', nullif(trim("current"->>'state'), '')), 100) END AS state,
+                  CASE WHEN 'assignedGroupName' = ANY(fields)
+                      THEN left(nullif(trim("current"->>'assignedGroupName'), ''), 150) END AS team,
+                  CASE WHEN 'solution' = ANY(fields)
+                      THEN left(nullif(trim("current"->>'solution'), ''), 240) END AS solution,
+                  CASE WHEN 'solution' = ANY(fields) OR 'reopened' = ANY(types)
+                      THEN left(nullif(trim(previous->>'solution'), ''), 240) END AS previous_solution
+           FROM change_events WHERE incident_pk = $1 AND {MATERIAL_CHANGE}
+           ORDER BY incident_revision DESC LIMIT $2"#
+    );
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(incident_pk)
+        .bind(SUMMARY_HISTORY_LIMIT as i64)
+        .fetch_all(conn)
+        .await?;
+    rows.iter()
+        .rev()
+        .map(|row| {
+            Ok(SummaryEvent {
+                at: row.try_get("at")?,
+                reopened: row.try_get("reopened")?,
+                state: row.try_get("state")?,
+                team: row.try_get("team")?,
+                solution: row.try_get("solution")?,
+                previous_solution: row.try_get("previous_solution")?,
+            })
+        })
+        .collect()
+}
+
+/// Версия входа меняется вслед за текущими фактами и журналом существенных изменений.
+/// Дата сериализуется в UTC независимо от настроек клиента PostgreSQL.
+fn summary_input_sql() -> String {
+    format!(
+        r#"jsonb_build_object(
+        'header', i.header, 'shortDescription', i.short_description, 'description', i.description,
+        'product', i.product_name, 'service', i.service, 'scenario', i.scenario_name,
+        'state', i.normalized_state, 'team', i.assigned_group_name, 'solution', i.solution,
+        'eliminationType', i.elimination_type,
+        'completionDate', to_char(i.completion_date AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+        'historyRevision', (SELECT incident_revision FROM change_events WHERE incident_pk = i.pk
+            AND {MATERIAL_CHANGE} ORDER BY incident_revision DESC LIMIT 1))"#
+    )
+}
 
 /// Отметка в `error` для задач, вход которых больше не совпадает с реестром.
 pub const OBSOLETE: &str = "obsolete";
@@ -59,36 +108,48 @@ impl JobSpec {
 /// Идемпотентна: повторный вызов без изменений реестра ничего не добавляет.
 /// Возвращает число поставленных задач.
 pub async fn enqueue(conn: &mut PgConnection, spec: &JobSpec) -> Result<u64, sqlx::Error> {
+    enqueue_for(conn, spec, None).await
+}
+
+/// Сразу ставит выжимку после назначения команды из интерфейса.
+pub async fn enqueue_incident(conn: &mut PgConnection, spec: &JobSpec, pk: i64) -> Result<u64, sqlx::Error> {
+    enqueue_for(conn, spec, Some(pk)).await
+}
+
+async fn enqueue_for(conn: &mut PgConnection, spec: &JobSpec, pk: Option<i64>) -> Result<u64, sqlx::Error> {
+    let input = summary_input_sql();
     let obsolete = format!(
         "UPDATE analysis_jobs j SET status = 'failed', error = '{OBSOLETE}', locked_until = NULL, \
-         finished_at = now(), updated_at = now() \
-         FROM incidents i \
-         WHERE j.incident_pk = i.pk AND j.kind = $1 AND j.status = 'queued' \
-           AND (NOT i.is_present OR j.input <> {INPUT_SQL} OR j.model <> $2 OR j.prompt_version <> $3)"
+         finished_at = now(), updated_at = now() FROM incidents i \
+         WHERE j.incident_pk = i.pk AND j.kind = $1 AND j.status = 'queued' AND ($4::bigint IS NULL OR i.pk = $4) \
+           AND (NOT i.is_present OR j.input <> {input} OR j.model <> $2 OR j.prompt_version <> $3)"
     );
     sqlx::query(sqlx::AssertSqlSafe(obsolete))
         .bind(&spec.kind)
         .bind(&spec.model)
         .bind(&spec.prompt_version)
+        .bind(pk)
         .execute(&mut *conn)
         .await?;
     let insert = format!(
-        "INSERT INTO analysis_jobs \
+        "WITH current_inputs AS MATERIALIZED ( \
+             SELECT i.pk, i.id, i.sys_id, i.incident_revision, {input} AS input FROM incidents i \
+             WHERE i.is_present AND ($5::bigint IS NULL OR i.pk = $5)) \
+         INSERT INTO analysis_jobs \
            (incident_pk, incident_id, sys_id, kind, incident_revision, input, model, prompt_version, max_attempts) \
-         SELECT i.pk, i.id, i.sys_id, $1, i.incident_revision, {INPUT_SQL}, $2, $3, $4 \
-         FROM incidents i \
-         WHERE i.is_present AND NOT EXISTS ( \
-           SELECT 1 FROM analysis_jobs j \
-           WHERE j.incident_pk = i.pk AND j.kind = $1 AND j.model = $2 AND j.prompt_version = $3 \
-             AND j.input = {INPUT_SQL} AND j.error IS DISTINCT FROM '{OBSOLETE}') \
-         ORDER BY i.pk \
-         ON CONFLICT DO NOTHING"
+         SELECT i.pk, i.id, i.sys_id, $1, i.incident_revision, i.input, $2, $3, $4 \
+         FROM current_inputs i WHERE NOT EXISTS ( \
+             SELECT 1 FROM analysis_jobs j WHERE j.incident_pk = i.pk AND j.kind = $1 \
+               AND j.model = $2 AND j.prompt_version = $3 AND j.input = i.input \
+               AND j.error IS DISTINCT FROM '{OBSOLETE}') \
+         ORDER BY i.pk ON CONFLICT DO NOTHING"
     );
     let done = sqlx::query(sqlx::AssertSqlSafe(insert))
         .bind(&spec.kind)
         .bind(&spec.model)
         .bind(&spec.prompt_version)
         .bind(spec.max_attempts)
+        .bind(pk)
         .execute(conn)
         .await?;
     Ok(done.rows_affected())
@@ -159,7 +220,10 @@ pub async fn input_is_current(
     incident_pk: i64,
     input: &Value,
 ) -> Result<bool, sqlx::Error> {
-    let sql = format!("SELECT {INPUT_SQL} = $2 FROM incidents i WHERE i.pk = $1 AND i.is_present");
+    let sql = format!(
+        "SELECT {} = $2 FROM incidents i WHERE i.pk = $1 AND i.is_present",
+        summary_input_sql()
+    );
     let current: Option<bool> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(incident_pk)
         .bind(input)
@@ -238,18 +302,29 @@ pub struct StoredResult {
     pub finished_at: DateTime<Utc>,
 }
 
-/// Последний завершённый результат `provider='llm'` для текущих полей инцидента и генерации.
-pub async fn current_result(
+/// Состояние фоновой выжимки для текущего входа, модели и версии промпта.
+#[derive(Debug, Clone)]
+pub enum SummaryStatus {
+    Ready(StoredResult),
+    Pending,
+    Unavailable,
+}
+
+pub async fn summary_status(
     conn: &mut PgConnection,
     spec: &JobSpec,
     incident_pk: i64,
-) -> Result<Option<StoredResult>, sqlx::Error> {
+) -> Result<SummaryStatus, sqlx::Error> {
+    let input = summary_input_sql();
     let sql = format!(
-        "SELECT j.result, j.finished_at FROM analysis_jobs j JOIN incidents i ON i.pk = j.incident_pk \
+        "WITH current_input AS MATERIALIZED (SELECT {input} AS input FROM incidents i WHERE i.pk = $1) \
+         SELECT j.result, j.finished_at, j.status = 'completed' AS ready \
+         FROM analysis_jobs j CROSS JOIN current_input i \
          WHERE j.incident_pk = $1 AND j.kind = $2 AND j.model = $3 AND j.prompt_version = $4 \
-           AND j.status = 'completed' AND j.provider = 'llm' AND j.result IS NOT NULL \
-           AND j.finished_at IS NOT NULL AND j.input = {INPUT_SQL} \
-         ORDER BY j.finished_at DESC LIMIT 1"
+           AND j.input = i.input AND (j.status IN ('queued', 'running') OR ( \
+               j.status = 'completed' AND j.provider = 'llm' AND j.finished_at IS NOT NULL \
+               AND jsonb_typeof(j.result->'summary') = 'string' AND trim(j.result->>'summary') <> '')) \
+         ORDER BY ready DESC, j.finished_at DESC NULLS LAST LIMIT 1"
     );
     let row = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(incident_pk)
@@ -258,13 +333,17 @@ pub async fn current_result(
         .bind(&spec.prompt_version)
         .fetch_optional(conn)
         .await?;
-    row.map(|r| {
-        Ok(StoredResult {
-            result: r.try_get("result")?,
-            finished_at: r.try_get("finished_at")?,
-        })
-    })
-    .transpose()
+    let Some(row) = row else {
+        return Ok(SummaryStatus::Unavailable);
+    };
+    if row.try_get("ready")? {
+        Ok(SummaryStatus::Ready(StoredResult {
+            result: row.try_get("result")?,
+            finished_at: row.try_get("finished_at")?,
+        }))
+    } else {
+        Ok(SummaryStatus::Pending)
+    }
 }
 
 /// Названия справочника команд.
