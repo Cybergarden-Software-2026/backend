@@ -19,6 +19,7 @@ Status reflects the committed implementation in the owning repository. Productio
 | `GET /api/v1/snapshot` and `GET /api/v1/dashboard` | `backend` | Implemented |
 | `GET /api/v1/incidents` with page and cursor pagination, and `GET /api/v1/incidents/{key}?view=web` | `backend` | Implemented |
 | Public incident form and direct submission to the incident queue via `/api/v1/incident-reports` | `backend` | Implemented |
+| Original time allocation in the web and mobile incident details | `frontend-web` | Implemented |
 | Import web-form reports into the incident queue and publish them through the existing snapshot and event stream | `backend` | Implemented (enabled per deployment) |
 | `GET /api/v1/teams` and rules-based `GET /api/v1/incidents/{key}/analysis` | `backend` | Implemented |
 | LLM summary and team suggestion in `GET /api/v1/incidents/{key}/analysis` (`provider: "llm"`, background `ai-worker`, `LLM_ENABLED`) | `backend` | Implemented (verified with a mock model; enabled per deployment) |
@@ -116,13 +117,18 @@ Open `GET /api/v1/incident-reports/form` on the dashboard domain. The browser se
   "title": "The customer portal is unavailable",
   "description": "The sign-in page times out for multiple users.",
   "service": "Customer portal",
-  "priority": "P2"
+  "priority": "P2",
+  "allocated_minutes": 90
 }
 ```
 
 Send a canonical lowercase UUIDv4 in `submission_id`. The server trims the three text fields. The title and service accept 1–160 characters each, and the description accepts 1–5000. Priority accepts `P1`, `P2`, `P3`, or `P4`. The request body is limited to 32 KiB.
 
 The first successful submission returns `201 {"id":"INC-FORM-123","created":true}`. Sending the same fields with the same UUID returns `200` with the original number and `created:false`. Changed fields with the same UUID return `409`. A `429` response includes `Retry-After`. Use the coordinator dashboard to view or assign reports.
+
+The optional `allocated_minutes` field accepts 1–525600 whole minutes. The backend saves the original duration as `allocatedMinutes` on the incident and sets its `deadline` to the server's `submitDate` plus that duration. Omit the field or send `null` to create a report without a deadline. Retrying the same UUID preserves the original deadline. Changing the duration for that UUID returns `409`.
+
+The web and mobile incident details display the original allocation under «Выделено на решение» for native form reports with a deadline. They derive it from the interval between the registration date and the deadline. The queue continues to show the remaining SLA time.
 
 ## 1. Get a snapshot and find incident identifiers
 

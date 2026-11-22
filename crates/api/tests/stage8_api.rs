@@ -81,6 +81,16 @@ impl Api {
         self.request("GET", path, &[]).await
     }
 
+    async fn post_report(&self, report: &Value) -> Res {
+        self.send(
+            "POST",
+            "/incident-reports",
+            &[("Content-Type", "application/json")],
+            Body::from(report.to_string()),
+        )
+        .await
+    }
+
     async fn assign(&self, sys_id: &str, team: &str, revision: i64) -> Res {
         self.send(
             "POST",
@@ -139,21 +149,13 @@ async fn public_form_saves_once_and_the_incident_survives_an_itsm_import() {
         "description": "Затронуты два подразделения",
         "service": "Личный кабинет",
         "priority": "P1",
+        "allocated_minutes": 90,
     });
-    let headers = [("Content-Type", "application/json")];
     let mut invalid = request.clone();
     invalid["description"] = json!(" ");
-    assert_eq!(
-        api.send("POST", root, &headers, Body::from(invalid.to_string()))
-            .await
-            .status,
-        400
-    );
+    assert_eq!(api.post_report(&invalid).await.status, 400);
 
-    let (first, second) = tokio::join!(
-        api.send("POST", root, &headers, Body::from(request.to_string())),
-        api.send("POST", root, &headers, Body::from(request.to_string()))
-    );
+    let (first, second) = tokio::join!(api.post_report(&request), api.post_report(&request));
     let (created, replay) = if first.status == 201 {
         (first, second)
     } else {
@@ -167,14 +169,17 @@ async fn public_form_saves_once_and_the_incident_survives_an_itsm_import() {
     assert_eq!(created["created"], true);
     assert_eq!(replay.json(), json!({"id":id,"created":false}));
 
+    api.e.clock.advance(600.0);
+    assert_eq!(
+        api.post_report(&request).await.json(),
+        json!({"id":id,"created":false})
+    );
+    let mut changed = request.clone();
+    changed["allocated_minutes"] = json!(91);
+    assert_eq!(api.post_report(&changed).await.status, 409);
     let mut changed = request;
     changed["priority"] = json!("P4");
-    assert_eq!(
-        api.send("POST", root, &headers, Body::from(changed.to_string()))
-            .await
-            .status,
-        409
-    );
+    assert_eq!(api.post_report(&changed).await.status, 409);
 
     let snapshot = api.json("/snapshot?view=web").await;
     assert_eq!(snapshot["items"].as_array().unwrap().len(), 1);
@@ -195,8 +200,61 @@ async fn public_form_saves_once_and_the_incident_survives_an_itsm_import() {
     );
 
     api.imported(&[]).await;
-    let snapshot = api.json("/snapshot?view=web").await;
-    assert_eq!(snapshot["items"][0]["id"], id);
+    let queue = api.json("/incidents?page=1&pageSize=9").await;
+    let detail = api.json(&format!("/incidents/{id}?view=web")).await;
+    for item in [&queue["items"][0], &detail["incident"]] {
+        assert_eq!(item["id"], id);
+        assert_eq!(item["allocatedMinutes"], 90);
+        let dates = &item["dashboard"]["sourceDates"];
+        assert_eq!(dates["submitDate"], "2026-11-20T12:00:00Z");
+        assert_eq!(dates["deadline"], "2026-11-20T13:30:00Z");
+    }
+    api.finish().await;
+}
+
+#[tokio::test]
+async fn public_form_accepts_optional_whole_minutes_within_one_year() {
+    let api = api!();
+    let mut report = json!({
+        "submission_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "title": "Заявка без срока",
+        "description": "Проверка длительности",
+        "service": "Дашборд",
+        "priority": "P4",
+    });
+    let legacy = api.post_report(&report).await;
+    assert_eq!(legacy.status, 201);
+    let legacy = legacy.json();
+    let id = legacy["id"].as_str().unwrap();
+    assert_eq!(
+        api.post_report(&report).await.json(),
+        json!({"id":id,"created":false})
+    );
+    let detail = api.json(&format!("/incidents/{id}?view=web")).await;
+    let incident = &detail["incident"];
+    assert!(incident["allocatedMinutes"].is_null());
+    assert!(incident["dashboard"]["sourceDates"]["deadline"].is_null());
+    report["allocated_minutes"] = Value::Null;
+    assert_eq!(api.post_report(&report).await.status, 200);
+    report["allocated_minutes"] = json!(1);
+    assert_eq!(api.post_report(&report).await.status, 409);
+
+    for invalid in [
+        json!(-1),
+        json!(0),
+        json!(525601),
+        json!(1.5),
+        json!("90"),
+        json!(true),
+    ] {
+        report["allocated_minutes"] = invalid.clone();
+        assert_eq!(api.post_report(&report).await.status, 400, "{invalid}");
+    }
+    for minutes in [1, 525600] {
+        report["submission_id"] = json!(uuid::Uuid::new_v4().to_string());
+        report["allocated_minutes"] = json!(minutes);
+        assert_eq!(api.post_report(&report).await.status, 201, "{minutes}");
+    }
     api.finish().await;
 }
 

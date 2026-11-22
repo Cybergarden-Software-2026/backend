@@ -34,6 +34,7 @@ pub struct NativeFormReport {
     pub description: String,
     pub service: String,
     pub priority_id: i64,
+    pub allocated_minutes: Option<u32>,
 }
 
 impl NativeFormReport {
@@ -42,6 +43,7 @@ impl NativeFormReport {
             && raw["description"].as_str() == Some(self.description.as_str())
             && raw["service"].as_str() == Some(self.service.as_str())
             && raw["priorityId"].as_i64() == Some(self.priority_id)
+            && raw["allocatedMinutes"].as_u64() == self.allocated_minutes.map(u64::from)
     }
 }
 
@@ -490,7 +492,18 @@ impl ImportService {
             "submitDate": registered_at,
             "lastAssignmentToTeamDateTime": registered_at,
         });
-        let Value::Object(raw) = raw else { unreachable!() };
+        let Value::Object(mut raw) = raw else {
+            unreachable!()
+        };
+        if let Some(minutes) = report.allocated_minutes {
+            let deadline = received_at
+                .checked_add_signed(TimeDelta::minutes(i64::from(minutes)))
+                .ok_or_else(|| {
+                    ImportError::Task(format!("Deadline out of range for web form incident {id}"))
+                })?;
+            raw.insert("allocatedMinutes".into(), json!(minutes));
+            raw.insert("deadline".into(), json!(iso_z(&deadline)));
+        }
         normalize_record(raw, self.settings.source_naive_timezone)
             .map_err(|_| ImportError::Task(format!("Invalid web form incident {id}")))
     }
@@ -554,6 +567,7 @@ impl ImportService {
                     description: incoming.description,
                     service: incoming.service,
                     priority_id: incoming.priority_id,
+                    allocated_minutes: None,
                 };
                 entries.push(self.form_incident(&id, sys_id, &report, incoming.received_at)?);
                 identities.push((report.submission_id, id));

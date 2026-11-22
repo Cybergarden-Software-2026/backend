@@ -105,6 +105,7 @@ struct ReportInput {
     description: String,
     service: String,
     priority: Priority,
+    allocated_minutes: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -144,6 +145,12 @@ impl ReportInput {
                     && value.to_string() == self.submission_id
             })
             .ok_or_else(|| AppError::validation("Поле submission_id должно содержать UUID версии 4."))?;
+        if self
+            .allocated_minutes
+            .is_some_and(|minutes| !(1..=525_600).contains(&minutes))
+        {
+            return Err(AppError::validation("Укажите от 1 до 525600 минут на решение."));
+        }
         Ok(NativeFormReport {
             submission_id: uuid.to_string(),
             title: validated_text(self.title, 160, "Укажите заголовок длиной до 160 символов.")?,
@@ -154,6 +161,7 @@ impl ReportInput {
             )?,
             service: validated_text(self.service, 160, "Укажите сервис длиной до 160 символов.")?,
             priority_id: self.priority.dashboard_id(),
+            allocated_minutes: self.allocated_minutes,
         })
     }
 }

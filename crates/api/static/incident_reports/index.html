@@ -26,7 +26,7 @@
     <section class="sheet" id="entry" aria-labelledby="form-title">
       <div class="sheet-heading">
         <h1 id="form-title">Сообщить об инциденте</h1>
-        <p>Все поля обязательны.</p>
+        <p>Заголовок, описание, сервис и приоритет обязательны.</p>
       </div>
       <form id="incident" action="/api/v1/incident-reports" method="post">
         <div class="fields">
@@ -51,6 +51,11 @@
               <label class="choice"><input type="radio" name="priority" value="P4" required><span><strong>P4</strong><small>Низкий</small></span></label>
             </div>
           </fieldset>
+          <div class="field">
+            <label for="allocated-minutes">Время на решение, мин</label>
+            <input id="allocated-minutes" name="allocated_minutes" type="number" inputmode="numeric" min="1" max="525600" step="1" aria-describedby="duration-hint" placeholder="Например, 90">
+            <small id="duration-hint">Необязательно. Отсчёт начнётся при регистрации заявки.</small>
+          </div>
         </div>
         <div class="actions">
           <noscript><p class="problem">Включите JavaScript в браузере, чтобы отправить форму.</p></noscript>

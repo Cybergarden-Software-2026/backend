@@ -44,7 +44,8 @@
                   "title": {"type": "string", "minLength": 1, "maxLength": 160},
                   "description": {"type": "string", "minLength": 1, "maxLength": 5000},
                   "service": {"type": "string", "minLength": 1, "maxLength": 160},
-                  "priority": {"type": "string", "enum": ["P1", "P2", "P3", "P4"]}
+                  "priority": {"type": "string", "enum": ["P1", "P2", "P3", "P4"]},
+                  "allocated_minutes": {"type": ["integer", "null"], "minimum": 1, "maximum": 525600, "description": "Time allowed for resolution in whole minutes from registration. Omit or send null for no deadline."}
                 }
               }
             }

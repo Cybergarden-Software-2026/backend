@@ -36,6 +36,8 @@
       }
     }
     answers.priority = form.elements.namedItem("priority").value;
+    const duration = form.elements.namedItem("allocated_minutes");
+    if (duration.value !== "") answers.allocated_minutes = duration.valueAsNumber;
     return answers;
   }
 
