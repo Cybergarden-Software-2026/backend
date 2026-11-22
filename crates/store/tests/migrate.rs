@@ -107,6 +107,7 @@ const SCHEMA_TABLES: &[&str] = &[
     "incident_changes",
     "incidents",
     "mass_problem_workspace",
+    "mobile_bell_state",
     "mobile_pairings",
     "mobile_devices",
     "mobile_push_deliveries",
@@ -125,9 +126,9 @@ async fn empty_database_is_migrated_and_marked_for_alembic() {
     let Some(db) = TempDb::create().await else { return };
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     assert!(report.adopted_from_alembic.is_empty());
-    assert_eq!(report.alembic_revision.as_deref(), Some("0008"));
+    assert_eq!(report.alembic_revision.as_deref(), Some("0009"));
 
     assert_eq!(
         db.tables().await,
@@ -137,7 +138,7 @@ async fn empty_database_is_migrated_and_marked_for_alembic() {
     assert_eq!(
         db.scalar_strings("SELECT version_num::text FROM alembic_version")
             .await,
-        vec!["0008"]
+        vec!["0009"]
     );
     // Сид из SQL на месте.
     assert_eq!(
@@ -149,7 +150,7 @@ async fn empty_database_is_migrated_and_marked_for_alembic() {
     // Повторный запуск — без изменений.
     let again = migrate::run(&db.pool).await.unwrap();
     assert!(again.applied.is_empty() && again.adopted_from_alembic.is_empty());
-    assert_eq!(again.alembic_revision.as_deref(), Some("0008"));
+    assert_eq!(again.alembic_revision.as_deref(), Some("0009"));
 
     db.drop().await;
 }
@@ -183,10 +184,10 @@ async fn coordinator_sessions_upgrade_preserves_existing_cluster_reviews() {
     .unwrap();
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![5, 6, 7, 8]);
+    assert_eq!(report.applied, vec![5, 6, 7, 8, 9]);
     assert!(report.adopted_from_alembic.is_empty());
     assert!(report.reverted_by_alembic.is_empty());
-    assert_eq!(report.alembic_revision.as_deref(), Some("0008"));
+    assert_eq!(report.alembic_revision.as_deref(), Some("0009"));
     assert_eq!(
         db.scalar_strings("SELECT kind || ':' || model FROM analysis_jobs")
             .await,
@@ -223,8 +224,8 @@ async fn coordinator_accounts_upgrade_keeps_legacy_sessions_unlinked() {
     .unwrap();
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![6, 7, 8]);
-    assert_eq!(report.alembic_revision.as_deref(), Some("0008"));
+    assert_eq!(report.applied, vec![6, 7, 8, 9]);
+    assert_eq!(report.alembic_revision.as_deref(), Some("0009"));
     assert_eq!(
         db.scalar_strings(
             "SELECT encode(token_hash, 'hex') FROM coordinator_sessions WHERE account_login IS NULL"
@@ -260,10 +261,10 @@ async fn mobile_session_migration_preserves_legacy_push_registration_in_both_dir
     let legacy = db.scalar_strings(ALL_DEVICES).await;
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![8]);
+    assert_eq!(report.applied, vec![8, 9]);
     assert_eq!(
         db.scalar_strings(
-            "SELECT (to_jsonb(d) - 'client_device_id')::text FROM mobile_devices d \
+            "SELECT (to_jsonb(d) - 'client_device_id' - 'fcm_registered_at')::text FROM mobile_devices d \
              WHERE client_device_id IS NULL",
         )
         .await,
@@ -277,11 +278,160 @@ async fn mobile_session_migration_preserves_legacy_push_registration_in_both_dir
     .execute(&db.pool)
     .await
     .unwrap();
+    sqlx::raw_sql(include_str!("../../../migrations/0009_mobile_bell_down.sql"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
     sqlx::raw_sql(include_str!("../../../migrations/0008_mobile_sessions_down.sql"))
         .execute(&db.pool)
         .await
         .unwrap();
     assert_eq!(db.scalar_strings(ALL_DEVICES).await, legacy);
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn bell_upgrade_preserves_queued_pushes_and_sends_new_events_only_to_existing_registrations() {
+    let Some(db) = TempDb::create().await else { return };
+    Migrator::with_migrations(
+        migrate::migrator()
+            .migrations
+            .iter()
+            .filter(|migration| migration.version <= 8)
+            .cloned()
+            .collect(),
+    )
+    .run(&db.pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO incidents (id, sys_id, normalized_state, priority_id, submit_date, raw, content_hash)
+         VALUES ('INC1', 'S1', 'Assigned', 4, now(), '{}', 'seed');
+         INSERT INTO coordinator_accounts (login, display_name, password_hash, key_hash)
+         VALUES ('alice', 'Alice', 'fixture', decode(repeat('aa', 32), 'hex'));
+         INSERT INTO mobile_devices (account_login, platform, fcm_token, secret_hash)
+         VALUES ('alice', 'android', 'phone', sha256('phone')),
+                ('alice', 'web', 'web', sha256('web')),
+                ('alice', 'android', NULL, sha256('late'));
+         INSERT INTO notifications (type, incident_id, sys_id, title, dedup_key)
+         VALUES ('critical.raised', 'INC1', 'S1', 'Critical', 'before-upgrade');
+         UPDATE mobile_push_deliveries SET attempts = 2, available_at = now() + interval '2 minutes';",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    const QUEUE: &str = "SELECT to_jsonb(q)::text FROM mobile_push_deliveries q ORDER BY device_id";
+    let pending = db.scalar_strings(QUEUE).await;
+    assert_eq!(pending.len(), 2);
+
+    let report = migrate::run(&db.pool).await.unwrap();
+    assert_eq!(report.applied, vec![9]);
+    assert_eq!(
+        db.scalar_strings(
+            "SELECT 'baseline' FROM mobile_bell_state WHERE NOT initialized AND next_check_at IS NOT NULL"
+        )
+        .await,
+        ["baseline"]
+    );
+    let event_time: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    // Token rotation retains eligibility for a delayed tick. First registration after the tick does not.
+    sqlx::raw_sql(
+        "UPDATE mobile_devices SET fcm_token = 'rotated' WHERE fcm_token = 'phone';
+         UPDATE mobile_devices SET fcm_token = 'late' WHERE fcm_token IS NULL;",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("SELECT enqueue_mobile_bell('waiting', 'INC1', 'S1', $1)")
+        .bind(event_time)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.scalar_strings(
+            "SELECT d.fcm_token FROM mobile_push_deliveries q JOIN mobile_devices d ON d.id = q.device_id
+             WHERE q.bell_kind = 'waiting' AND q.bell_incident_id = 'INC1' AND q.bell_sys_id = 'S1'
+               AND q.journal_notification_id IS NULL ORDER BY d.fcm_token",
+        )
+        .await,
+        ["rotated", "web"]
+    );
+    let event_ids = db
+        .scalar_strings("SELECT DISTINCT notification_id::text FROM mobile_push_deliveries")
+        .await;
+    assert_eq!(event_ids.len(), 2); // one journal ID and one shared bell ID
+
+    sqlx::raw_sql(include_str!("../../../migrations/0009_mobile_bell_down.sql"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(db.scalar_strings(QUEUE).await, pending);
+    sqlx::raw_sql(
+        "DELETE FROM notifications;
+         INSERT INTO notifications (type, incident_id, sys_id, title, dedup_key)
+         VALUES ('critical.raised', 'INC2', 'S2', 'Critical', 'after-rollback');",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(db.scalar_strings(QUEUE).await.len(), 3);
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn old_importer_writes_during_upgrade_reseed_timers_after_changes_and_restore() {
+    let Some(db) = TempDb::create().await else { return };
+    migrate::run(&db.pool).await.unwrap();
+    const BASELINES: &str = "SELECT i.id FROM mobile_bell_state b JOIN incidents i ON i.pk = b.incident_pk
+        WHERE NOT b.initialized AND b.kind IS NULL AND b.next_check_at IS NOT NULL";
+    sqlx::query(
+        "INSERT INTO incidents (id, sys_id, normalized_state, priority_id, submit_date, raw, content_hash)
+         VALUES ('INC1', 'S1', 'Assigned', 4, now(), '{}', 'seed')",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(db.scalar_strings(BASELINES).await, ["INC1"]);
+
+    // The current importer updates its own signatures. Its transaction-local
+    // marker must not suppress the hook for a later write from an older binary.
+    sqlx::raw_sql(
+        "BEGIN;
+         SET LOCAL underctrl.mobile_bell_writer = '1';
+         UPDATE mobile_bell_state SET initialized = true, kind = 'critical', next_check_at = NULL;
+         UPDATE incidents SET incident_revision = incident_revision + 1;
+         COMMIT;",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        db.scalar_strings("SELECT kind FROM mobile_bell_state WHERE initialized")
+            .await,
+        ["critical"]
+    );
+    sqlx::query("UPDATE incidents SET priority_id = 2, incident_revision = incident_revision + 1")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(db.scalar_strings(BASELINES).await, ["INC1"]);
+    sqlx::query("UPDATE incidents SET is_present = false, incident_revision = incident_revision + 1")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        db.scalar_strings("SELECT incident_pk::text FROM mobile_bell_state")
+            .await
+            .is_empty()
+    );
+    sqlx::query("UPDATE incidents SET is_present = true, incident_revision = incident_revision + 1")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(db.scalar_strings(BASELINES).await, ["INC1"]);
     db.drop().await;
 }
 
@@ -296,9 +446,9 @@ async fn database_created_by_alembic_is_adopted_without_running_sql() {
         .unwrap();
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(report.applied, vec![2, 3, 4, 5, 6, 7, 8, 9]);
     assert_eq!(report.adopted_from_alembic, vec![1]);
-    assert_eq!(report.alembic_revision.as_deref(), Some("0008"));
+    assert_eq!(report.alembic_revision.as_deref(), Some("0009"));
     assert_eq!(
         db.scalar_strings("SELECT status FROM import_state WHERE id = 1")
             .await,
@@ -349,11 +499,11 @@ async fn concurrent_runs_apply_once() {
     );
     let reports = [a.unwrap(), b.unwrap(), c.unwrap()];
     let applied: Vec<i64> = reports.iter().flat_map(|r| r.applied.clone()).collect();
-    assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     assert_eq!(
         db.scalar_strings("SELECT version_num::text FROM alembic_version")
             .await,
-        vec!["0008"]
+        vec!["0009"]
     );
     db.drop().await;
 }
@@ -364,6 +514,10 @@ async fn concurrent_runs_apply_once() {
 async fn alembic_downgrade_is_respected() {
     let Some(db) = TempDb::create().await else { return };
     migrate::run(&db.pool).await.unwrap();
+    sqlx::raw_sql(include_str!("../../../migrations/0009_mobile_bell_down.sql"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
     sqlx::raw_sql(include_str!("../../../migrations/0008_mobile_sessions_down.sql"))
         .execute(&db.pool)
         .await
@@ -406,8 +560,8 @@ async fn alembic_downgrade_is_respected() {
         .unwrap();
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.reverted_by_alembic, vec![1, 2, 3, 4, 5, 6, 7, 8]);
-    assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(report.reverted_by_alembic, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     assert_eq!(
         db.tables().await,
         with_service_tables(&["_sqlx_migrations", "alembic_version"])
@@ -415,7 +569,7 @@ async fn alembic_downgrade_is_respected() {
     assert_eq!(
         db.scalar_strings("SELECT version_num::text FROM alembic_version")
             .await,
-        vec!["0008"]
+        vec!["0009"]
     );
     db.drop().await;
 }

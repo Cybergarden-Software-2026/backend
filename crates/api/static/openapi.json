@@ -1742,7 +1742,7 @@
         ],
         "operationId": "refresh_mobile_device_token",
         "summary": "Refresh this device’s FCM token",
-        "description": "Call when Firebase supplies a new FCM registration token or registered installation ID. Send the current identifier and target type together. Repeating the same update is safe.",
+        "description": "Call when Firebase supplies a new FCM registration token or registered installation ID. Send the current identifier and target type together. Repeating the same update is safe. Registered Android and web devices receive dashboard bell signals with data.type set to critical.raised, header.critical, header.waiting or header.deadline. Deduplicate by data.notificationId and open the incident by data.sysId.",
         "security": [
           {
             "MobileSessionBearer": []

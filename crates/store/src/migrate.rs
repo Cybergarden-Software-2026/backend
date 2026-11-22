@@ -84,6 +84,12 @@ pub const MIGRATIONS: &[SharedMigration] = &[
         description: "mobile account sessions by installation id",
         sql: include_str!("../../../migrations/0008_mobile_sessions_up.sql"),
     },
+    SharedMigration {
+        version: 9,
+        alembic_revision: "0009",
+        description: "mobile push delivery for header bell events",
+        sql: include_str!("../../../migrations/0009_mobile_bell_up.sql"),
+    },
 ];
 
 /// Ключ advisory lock миграций («MTS» + 2), чтобы два процесса `migrate` не синхронизировали
