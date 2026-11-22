@@ -190,6 +190,21 @@ pub async fn known_form_answers(
         .await
 }
 
+pub async fn find_form_incident(
+    conn: &mut PgConnection,
+    form_id: &str,
+    answer_id: &str,
+) -> Result<Option<(String, Value)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT i.id, i.raw FROM form_incidents f JOIN incidents i ON i.id = f.incident_id
+         WHERE f.form_id = $1 AND f.answer_id = $2",
+    )
+    .bind(form_id)
+    .bind(answer_id)
+    .fetch_optional(conn)
+    .await
+}
+
 pub async fn record_form_incident(
     conn: &mut PgConnection,
     form_id: &str,
@@ -200,6 +215,15 @@ pub async fn record_form_incident(
         .bind(form_id)
         .bind(answer_id)
         .bind(incident_id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+pub async fn mark_form_change(conn: &mut PgConnection, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE import_state SET last_change_at = $1, updated_at = $1 WHERE id = $2")
+        .bind(now)
+        .bind(IMPORT_STATE_ID)
         .execute(conn)
         .await?;
     Ok(())

@@ -14,7 +14,7 @@ use dashboard_domain::change_detector::{ImportPlan, IncidentPlan, PlanOptions, b
 use dashboard_domain::constants::{
     ChangeType, DashboardEventReason, FORM_INCIDENT_SYS_ID_PREFIX, NotificationType, SourceStatus,
 };
-use dashboard_domain::normalizer::{iso_z, normalize_record};
+use dashboard_domain::normalizer::{NormalizedIncident, iso_z, normalize_record};
 use dashboard_domain::validator::{ValidatedSnapshot, parse_and_validate};
 use dashboard_store::bell;
 use dashboard_store::import_repo::{
@@ -25,6 +25,30 @@ use sqlx::{PgConnection, PgPool};
 
 use crate::form_worker::{FORM_ID, FormReport};
 use crate::reader::{FileFingerprint, ReadResult};
+
+const NATIVE_FORM_ID: &str = "incident-native";
+
+pub struct NativeFormReport {
+    pub submission_id: String,
+    pub title: String,
+    pub description: String,
+    pub service: String,
+    pub priority_id: i64,
+}
+
+impl NativeFormReport {
+    fn matches(&self, raw: &Value) -> bool {
+        raw["header"].as_str() == Some(self.title.as_str())
+            && raw["description"].as_str() == Some(self.description.as_str())
+            && raw["service"].as_str() == Some(self.service.as_str())
+            && raw["priorityId"].as_i64() == Some(self.priority_id)
+    }
+}
+
+pub struct NativeFormReceipt {
+    pub id: String,
+    pub created: bool,
+}
 
 /// Итог обработки (`OutcomeStatus` Python-версии).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +152,8 @@ pub enum ImportError {
     Database(#[from] sqlx::Error),
     #[error("{0}")]
     Task(String),
+    #[error("the submitted form already exists with different contents")]
+    FormReportConflict,
 }
 
 impl ImportError {
@@ -140,7 +166,7 @@ impl ImportError {
     /// настоящем Python в `import_parity.rs`.
     pub fn python_type_name(&self) -> &'static str {
         match self {
-            Self::Task(_) => "RuntimeError",
+            Self::Task(_) | Self::FormReportConflict => "RuntimeError",
             Self::Database(sqlx::Error::Database(db)) => {
                 match db.code().as_deref().map(|c| c.get(..2).unwrap_or(c)) {
                     Some("23") => "IntegrityError",
@@ -404,6 +430,96 @@ impl ImportService {
         }
     }
 
+    /// Adds an incident directly from the form hosted by this API.
+    /// The form, journal and dashboard revision share the ITSM import transaction lock.
+    pub async fn submit_form_report(
+        &self,
+        report: NativeFormReport,
+    ) -> Result<NativeFormReceipt, ImportError> {
+        let mut tx = self.pool.begin().await?;
+        repo::lock_state(&mut tx).await?;
+        if let Some((id, raw)) =
+            repo::find_form_incident(&mut tx, NATIVE_FORM_ID, &report.submission_id).await?
+        {
+            if !report.matches(&raw) {
+                return Err(ImportError::FormReportConflict);
+            }
+            tx.commit().await?;
+            return Ok(NativeFormReceipt { id, created: false });
+        }
+
+        let now = self.now();
+        let payload = json!({
+            "schemaVersion": 1, "initial": false, "created": 1,
+            "updated": 0, "removed": 0, "restored": 0, "source": NATIVE_FORM_ID,
+        });
+        // Each native report owns one dashboard event, so its revision also supplies a unique number.
+        let revision =
+            repo::new_dashboard_event(&mut tx, DashboardEventReason::Import, &payload, now).await?;
+        let id = format!("INC-FORM-{revision}");
+        let sys_id = format!("{FORM_INCIDENT_SYS_ID_PREFIX}native-{}", report.submission_id);
+        let entry = self.form_incident(&id, sys_id, &report, now)?;
+        let plan = build_import_plan(&[], vec![entry], &self.plan_options(now, false));
+        let identities = [(report.submission_id, id.clone())];
+        self.apply_form_plan(&mut tx, NATIVE_FORM_ID, &plan, &identities, revision, now)
+            .await?;
+
+        tx.commit().await?;
+        Ok(NativeFormReceipt { id, created: true })
+    }
+
+    fn form_incident(
+        &self,
+        id: &str,
+        sys_id: String,
+        report: &NativeFormReport,
+        received_at: DateTime<Utc>,
+    ) -> Result<NormalizedIncident, ImportError> {
+        let registered_at = iso_z(&received_at);
+        let raw = json!({
+            "id": id,
+            "sysId": sys_id,
+            "header": report.title.replace('\0', "�"),
+            "description": report.description.replace('\0', "�"),
+            "service": report.service.replace('\0', "�"),
+            "priorityId": report.priority_id,
+            "stateEnum": "Assigned",
+            "stateId": 0,
+            "receivingChannel": "Веб-форма",
+            "assignedGroupName": self.settings.coordinator_group_name,
+            "submitDate": registered_at,
+            "lastAssignmentToTeamDateTime": registered_at,
+        });
+        let Value::Object(raw) = raw else { unreachable!() };
+        normalize_record(raw, self.settings.source_naive_timezone)
+            .map_err(|_| ImportError::Task(format!("Invalid web form incident {id}")))
+    }
+
+    async fn apply_form_plan(
+        &self,
+        conn: &mut PgConnection,
+        form_id: &str,
+        plan: &ImportPlan,
+        identities: &[(String, String)],
+        revision: i64,
+        now: DateTime<Utc>,
+    ) -> Result<(), ImportError> {
+        sqlx::query("INSERT INTO teams (name) VALUES ($1) ON CONFLICT DO NOTHING")
+            .bind(&self.settings.coordinator_group_name)
+            .execute(&mut *conn)
+            .await?;
+        apply_plan(conn, plan, revision, now).await?;
+        for (answer_id, incident_id) in identities {
+            repo::record_form_incident(conn, form_id, answer_id, incident_id).await?;
+        }
+        if self.settings.llm_enabled {
+            let spec = dashboard_store::analysis_repo::JobSpec::summary(&self.settings);
+            dashboard_store::analysis_repo::enqueue(conn, &spec).await?;
+        }
+        repo::mark_form_change(conn, now).await?;
+        Ok(())
+    }
+
     /// Writes a page and its cursor together. Returns false if another worker committed it first.
     pub(crate) async fn apply_form_page(
         &self,
@@ -412,7 +528,7 @@ impl ImportService {
         reports: Vec<FormReport>,
     ) -> Result<bool, ImportError> {
         let mut tx = self.pool.begin().await?;
-        let mut state = repo::lock_state(&mut tx).await?;
+        repo::lock_state(&mut tx).await?;
         if repo::forms_cursor(&mut tx).await? != expected_after {
             tx.rollback().await?;
             return Ok(false);
@@ -426,56 +542,33 @@ impl ImportService {
                 .await?
                 .into_iter()
                 .collect();
-            for report in reports {
-                if !known.insert(report.answer_id.clone()) {
+            for incoming in reports {
+                if !known.insert(incoming.answer_id.clone()) {
                     continue;
                 }
-                let registered_at = iso_z(&report.received_at);
-                let raw = json!({
-                    "id": format!("INC-WEB-{}", report.id),
-                    "sysId": format!("{FORM_INCIDENT_SYS_ID_PREFIX}{}", report.answer_id),
-                    "header": report.title.replace('\0', "�"),
-                    "description": report.description.replace('\0', "�"),
-                    "service": report.service.replace('\0', "�"),
-                    "priorityId": report.priority_id,
-                    "stateEnum": "Assigned",
-                    "stateId": 0,
-                    "receivingChannel": "Веб-форма",
-                    "assignedGroupName": self.settings.coordinator_group_name,
-                    "submitDate": registered_at,
-                    "lastAssignmentToTeamDateTime": registered_at,
-                });
-                let Value::Object(raw) = raw else { unreachable!() };
-                let incident = normalize_record(raw, self.settings.source_naive_timezone).map_err(|_| {
-                    ImportError::Task(format!("Invalid incident at form feed row {}", report.id))
-                })?;
-                identities.push((report.answer_id, incident.id.clone()));
-                entries.push(incident);
+                let id = format!("INC-WEB-{}", incoming.id);
+                let sys_id = format!("{FORM_INCIDENT_SYS_ID_PREFIX}{}", incoming.answer_id);
+                let report = NativeFormReport {
+                    submission_id: incoming.answer_id,
+                    title: incoming.title,
+                    description: incoming.description,
+                    service: incoming.service,
+                    priority_id: incoming.priority_id,
+                };
+                entries.push(self.form_incident(&id, sys_id, &report, incoming.received_at)?);
+                identities.push((report.submission_id, id));
             }
         }
 
         if !entries.is_empty() {
             let now = self.now();
-            sqlx::query("INSERT INTO teams (name) VALUES ($1) ON CONFLICT DO NOTHING")
-                .bind(&self.settings.coordinator_group_name)
-                .execute(&mut *tx)
-                .await?;
             let plan = build_import_plan(&[], entries, &self.plan_options(now, false));
             let mut payload = event_payload(&plan);
             payload["source"] = json!(FORM_ID);
             let revision =
                 repo::new_dashboard_event(&mut tx, DashboardEventReason::Import, &payload, now).await?;
-            apply_plan(&mut tx, &plan, revision, now).await?;
-            for (answer_id, incident_id) in identities {
-                repo::record_form_incident(&mut tx, FORM_ID, &answer_id, &incident_id).await?;
-            }
-            if self.settings.llm_enabled {
-                let spec = dashboard_store::analysis_repo::JobSpec::summary(&self.settings);
-                dashboard_store::analysis_repo::enqueue(&mut tx, &spec).await?;
-            }
-            state.last_change_at = Some(now);
-            state.updated_at = now;
-            repo::save_state(&mut tx, &state).await?;
+            self.apply_form_plan(&mut tx, FORM_ID, &plan, &identities, revision, now)
+                .await?;
         }
 
         repo::save_forms_cursor(&mut tx, next_after).await?;

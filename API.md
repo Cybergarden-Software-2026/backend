@@ -18,6 +18,7 @@ Status reflects the committed implementation in the owning repository. Productio
 | Mobile team-contact button and dedicated frontend journal label | `frontend-web` | Not implemented |
 | `GET /api/v1/snapshot` and `GET /api/v1/dashboard` | `backend` | Implemented |
 | `GET /api/v1/incidents` with page and cursor pagination, and `GET /api/v1/incidents/{key}?view=web` | `backend` | Implemented |
+| Public incident form and direct submission to the incident queue via `/api/v1/incident-reports` | `backend` | Implemented |
 | Import web-form reports into the incident queue and publish them through the existing snapshot and event stream | `backend` | Implemented (enabled per deployment) |
 | `GET /api/v1/teams` and rules-based `GET /api/v1/incidents/{key}/analysis` | `backend` | Implemented |
 | LLM summary and team suggestion in `GET /api/v1/incidents/{key}/analysis` (`provider: "llm"`, background `ai-worker`, `LLM_ENABLED`) | `backend` | Implemented (verified with a mock model; enabled per deployment) |
@@ -105,11 +106,29 @@ Each incident also has `teamPhone` and `teamPhoneIsTest`. Use the `teamPhone` st
 
 Both `android` and `web` registrations receive one FCM message per incident that triggers the dashboard bell. Handle all four `data.type` values listed in the [mobile push contract](docs/mobile.md#что-приходит-в-push). They are `critical.raised` (entering active P1), `header.critical` (a change to an existing critical card), `header.waiting` and `header.deadline`. The bell compares the card kind, assigned team, last assignment time and deadline for each `sysId`. Crossings of the 8-minute and 20% thresholds also qualify between imports. The first snapshot seeds the bell silently. Each subsequent signal has its own string `notificationId`, stable across retries. Use `sysId` to open the affected incident. The `header.*` IDs belong only to push delivery.
 
+### Public incident form
+
+Open `GET /api/v1/incident-reports/form` on the dashboard domain. The browser sends JSON to `POST /api/v1/incident-reports` without a coordinator session. Each report starts in `Assigned` in the coordinator group and appears through the standard incident snapshot and event stream. The form writes to the dashboard's PostgreSQL database.
+
+```json
+{
+  "submission_id": "11111111-2222-4333-8444-555555555555",
+  "title": "The customer portal is unavailable",
+  "description": "The sign-in page times out for multiple users.",
+  "service": "Customer portal",
+  "priority": "P2"
+}
+```
+
+Send a canonical lowercase UUIDv4 in `submission_id`. The server trims the three text fields. The title and service accept 1–160 characters each, and the description accepts 1–5000. Priority accepts `P1`, `P2`, `P3`, or `P4`. The request body is limited to 32 KiB.
+
+The first successful submission returns `201 {"id":"INC-FORM-123","created":true}`. Sending the same fields with the same UUID returns `200` with the original number and `created:false`. Changed fields with the same UUID return `409`. A `429` response includes `Retry-After`. Use the coordinator dashboard to view or assign reports.
+
 ## 1. Get a snapshot and find incident identifiers
 
 `GET /snapshot?view=web` returns JSON. The first successful import makes the snapshot available. If the source later stops updating, the API continues serving the most recent accepted snapshot with information about the source's condition.
 
-With web-form import enabled, a report makes the queue and snapshot available even before the first successful ITSM import. Reports produce the usual creation events. They start in `Assigned` with the configured coordinator group, use ticket numbers starting with `INC-WEB-`, and return `null` for `dashboard.itsmUrl`. The snapshot's `source` field describes the ITSM JSON export. See the [deployment guide](DEPLOY.md#заявки-из-веб-формы).
+A report from either form source makes the queue and snapshot available even before the first successful ITSM import. Reports produce the usual creation events. They start in `Assigned` with the configured coordinator group, use ticket numbers starting with `INC-FORM-` for direct submissions or `INC-WEB-` for relay imports, and return `null` for `dashboard.itsmUrl`. The snapshot's `source` field describes the ITSM JSON export. See the [deployment guide](DEPLOY.md#заявки-из-веб-формы).
 
 | Field | Type and meaning |
 |---|---|
