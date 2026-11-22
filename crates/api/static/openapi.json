@@ -3,7 +3,7 @@
   "info": {
     "title": "Dashboard API",
     "version": "1.0.0",
-    "description": "When coordinator access is configured, dashboard API operations require a valid coordinator session. Health, documentation and the session endpoint are public. When access is disabled, dashboard operations require no session."
+    "description": "When coordinator access is configured, dashboard API operations require a valid coordinator session. Health, documentation and the session endpoint are public. When access is disabled, dashboard operations require no session. Mobile push requires enabled personal coordinator accounts and MOBILE_PUSH_ENABLED. Owner operations use the coordinator cookie. Device registration exchanges the one-time QR credential in JSON. Subsequent device operations use a device-scoped bearer. Mobile responses specify Cache-Control: no-store."
   },
   "security": [
     {
@@ -1605,6 +1605,265 @@
           }
         },
         "security": []
+      }
+    },
+    "/api/v1/mobile/pairings": {
+      "post": {
+        "tags": [
+          "Mobile push"
+        ],
+        "operationId": "create_mobile_pairing",
+        "summary": "Create a personal pairing QR code",
+        "description": "Requires a personal coordinator session. Issuing a code invalidates any earlier unused code for the same account. Display the returned code verbatim as a QR symbol. The code expires after five minutes.",
+        "security": [
+          {
+            "CoordinatorSession": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created a one-time pairing credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobilePairing"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/CoordinatorUnauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/CoordinatorOriginForbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/MobileInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/MobilePushDisabled"
+          }
+        }
+      }
+    },
+    "/api/v1/mobile/devices": {
+      "get": {
+        "tags": [
+          "Mobile push"
+        ],
+        "operationId": "list_mobile_devices",
+        "summary": "List the current coordinator’s devices",
+        "description": "Requires a personal coordinator session. Returns device metadata ordered by most recent registration first.",
+        "security": [
+          {
+            "CoordinatorSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Devices owned by the signed-in account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileDeviceList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/CoordinatorUnauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/MobileInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/MobilePushDisabled"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Mobile push"
+        ],
+        "operationId": "register_mobile_device",
+        "summary": "Exchange a QR code for a device registration",
+        "description": "Send the scanned code with the client platform and FCM-registered identifier. The server consumes the code and registers the device atomically. A target conflict preserves the code until its original expiry. Save deviceToken from the response in secure client storage.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "description": "UTF-8 JSON request body, maximum 8192 bytes.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MobileRegistration"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registered device and its management credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileRegistrationResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/MobileValidation"
+          },
+          "401": {
+            "$ref": "#/components/responses/MobilePairingInvalid"
+          },
+          "409": {
+            "$ref": "#/components/responses/MobileFcmTokenInUse"
+          },
+          "413": {
+            "$ref": "#/components/responses/MobilePayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/MobileJsonRequired"
+          },
+          "500": {
+            "$ref": "#/components/responses/MobileInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/MobilePushDisabled"
+          }
+        }
+      }
+    },
+    "/api/v1/mobile/devices/current/token": {
+      "put": {
+        "tags": [
+          "Mobile push"
+        ],
+        "operationId": "refresh_mobile_device_token",
+        "summary": "Refresh this device’s FCM token",
+        "description": "Call when Firebase supplies a new FCM registration token or registered installation ID. Send the current identifier and target type together. Repeating the same update is safe.",
+        "security": [
+          {
+            "MobileDeviceBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "UTF-8 JSON request body, maximum 8192 bytes.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MobileTokenUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Registration token updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/MobileValidation"
+          },
+          "401": {
+            "$ref": "#/components/responses/MobileDeviceUnauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/MobileFcmTokenInUse"
+          },
+          "413": {
+            "$ref": "#/components/responses/MobilePayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/MobileJsonRequired"
+          },
+          "500": {
+            "$ref": "#/components/responses/MobileInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/MobilePushDisabled"
+          }
+        }
+      }
+    },
+    "/api/v1/mobile/devices/current": {
+      "delete": {
+        "tags": [
+          "Mobile push"
+        ],
+        "operationId": "unregister_mobile_device",
+        "summary": "Unregister this device",
+        "description": "The device bearer revokes its own registration and pending deliveries.",
+        "security": [
+          {
+            "MobileDeviceBearer": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Device unregistered and bearer revoked."
+          },
+          "401": {
+            "$ref": "#/components/responses/MobileDeviceUnauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/MobileInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/MobilePushDisabled"
+          }
+        }
+      }
+    },
+    "/api/v1/mobile/devices/{device_id}": {
+      "delete": {
+        "tags": [
+          "Mobile push"
+        ],
+        "operationId": "revoke_mobile_device",
+        "summary": "Revoke a device by ID",
+        "description": "Requires the personal coordinator session that owns the device. Use this endpoint to disconnect a lost device.",
+        "security": [
+          {
+            "CoordinatorSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "description": "Device ID returned by registration or the owner’s device list.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Device registration revoked."
+          },
+          "400": {
+            "$ref": "#/components/responses/MobileValidation"
+          },
+          "401": {
+            "$ref": "#/components/responses/CoordinatorUnauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/CoordinatorOriginForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/MobileDeviceNotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/MobileInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/MobilePushDisabled"
+          }
+        }
       }
     }
   },
@@ -4089,6 +4348,155 @@
           }
         },
         "description": "Present only for an authenticated individual account."
+      },
+      "MobilePairingCode": {
+        "type": "string",
+        "pattern": "^ucp_[0-9a-f]{64}$",
+        "minLength": 68,
+        "maxLength": 68,
+        "description": "Opaque one-time credential. Encode this complete string as the plain text of the QR symbol. The mobile scanner sends that exact text in the code field.",
+        "examples": [
+          "ucp_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ]
+      },
+      "MobileFcmToken": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048,
+        "pattern": "^[!-~]+$",
+        "description": "Opaque FCM-registered installation ID (FID) or legacy FCM registration token returned by the client Messaging SDK, consisting of visible ASCII characters."
+      },
+      "MobilePlatform": {
+        "type": "string",
+        "enum": [
+          "android",
+          "web"
+        ],
+        "description": "Use android for a native Android app and web for a browser FCM registration."
+      },
+      "MobilePairing": {
+        "type": "object",
+        "required": [
+          "code",
+          "expiresAt"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/MobilePairingCode"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC expiration instant, five minutes after issue."
+          }
+        }
+      },
+      "MobileRegistration": {
+        "type": "object",
+        "required": [
+          "code",
+          "platform",
+          "fcmToken"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/MobilePairingCode"
+          },
+          "platform": {
+            "$ref": "#/components/schemas/MobilePlatform"
+          },
+          "fcmToken": {
+            "$ref": "#/components/schemas/MobileFcmToken"
+          },
+          "fcmTargetType": {
+            "$ref": "#/components/schemas/MobileFcmTargetType"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MobileRegistrationResult": {
+        "type": "object",
+        "required": [
+          "deviceId",
+          "deviceToken"
+        ],
+        "properties": {
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "deviceToken": {
+            "type": "string",
+            "pattern": "^ucd_[0-9a-f]{64}$",
+            "minLength": 68,
+            "maxLength": 68,
+            "description": "Store securely on the device. Returned once, this bearer credential permits refreshing its FCM token and unregistering this device."
+          }
+        }
+      },
+      "MobileTokenUpdate": {
+        "type": "object",
+        "required": [
+          "fcmToken"
+        ],
+        "properties": {
+          "fcmToken": {
+            "$ref": "#/components/schemas/MobileFcmToken"
+          },
+          "fcmTargetType": {
+            "$ref": "#/components/schemas/MobileFcmTargetType"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MobileDevice": {
+        "type": "object",
+        "required": [
+          "deviceId",
+          "platform",
+          "createdAt",
+          "pushEnabled"
+        ],
+        "properties": {
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "platform": {
+            "$ref": "#/components/schemas/MobilePlatform"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "pushEnabled": {
+            "type": "boolean",
+            "description": "True while the server has an FCM registration token for this device."
+          }
+        }
+      },
+      "MobileDeviceList": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MobileDevice"
+            }
+          }
+        }
+      },
+      "MobileFcmTargetType": {
+        "type": "string",
+        "enum": [
+          "token",
+          "fid"
+        ],
+        "default": "token",
+        "description": "Select fid for a Firebase Installation ID reported by the FCM registration callback. The default token target supports clients using the legacy registration token."
       }
     },
     "securitySchemes": {
@@ -4096,6 +4504,12 @@
         "type": "apiKey",
         "in": "cookie",
         "name": "__Host-underctrl-coordinator"
+      },
+      "MobileDeviceBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque",
+        "description": "Device token issued by POST /api/v1/mobile/devices. Scoped to updating the registration token and unregistering this device."
       }
     },
     "responses": {
@@ -4111,6 +4525,96 @@
       },
       "CoordinatorOriginForbidden": {
         "description": "The browser origin is not permitted (COORDINATOR_ORIGIN_FORBIDDEN).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "MobilePushDisabled": {
+        "description": "Mobile push is disabled (MOBILE_PUSH_DISABLED).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "MobileValidation": {
+        "description": "Malformed JSON, invalid fields or invalid values (VALIDATION_ERROR).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "MobilePayloadTooLarge": {
+        "description": "The JSON body exceeds 8192 bytes (PAYLOAD_TOO_LARGE).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "MobileJsonRequired": {
+        "description": "The request requires a JSON Content-Type (UNSUPPORTED_MEDIA_TYPE).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "MobilePairingInvalid": {
+        "description": "The code is unknown, consumed, replaced, expired or belongs to a disabled account (MOBILE_PAIRING_INVALID).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "MobileDeviceUnauthorized": {
+        "description": "The device bearer is missing, invalid or revoked, or its account was disabled (MOBILE_DEVICE_UNAUTHORIZED).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "MobileFcmTokenInUse": {
+        "description": "Another device already uses this FCM registration identifier (FCM_TOKEN_IN_USE).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "MobileDeviceNotFound": {
+        "description": "There is no device with this ID belonging to the authenticated owner (MOBILE_DEVICE_NOT_FOUND).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "MobileInternalError": {
+        "description": "Internal processing or database error (INTERNAL_ERROR).",
         "content": {
           "application/json": {
             "schema": {

@@ -16,11 +16,15 @@ git_as_cyber() {
 compose() {
   local image=$1
   shift
-  UNDERCTRL_BACKEND_IMAGE="$image" docker compose \
+  local -a firebase=()
+  if [[ -f "$config/firebase-service-account.json" ]]; then
+    firebase=(-f "$config/compose.firebase.yml")
+  fi
+  FIREBASE_CREDENTIALS_FILE="$config/firebase-service-account.json" UNDERCTRL_BACKEND_IMAGE="$image" docker compose \
     --project-name mts-incident-dashboard \
     --project-directory "$repo" --env-file "$repo/.env" \
     -f "$config/docker-compose.yml" -f "$config/compose.vserver.yml" \
-    -f "$config/compose.image.yml" "$@"
+    -f "$config/compose.image.yml" "${firebase[@]}" "$@"
 }
 
 check_backend() {

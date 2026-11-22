@@ -55,6 +55,8 @@ pub struct Settings {
     pub default_user_id: String,
     pub coordinator_access_key: Option<CoordinatorAccessKey>,
     pub coordinator_accounts_enabled: bool,
+    pub mobile_push_enabled: bool,
+    pub firebase_project_id: Option<String>,
 
     // --- HTTP (только Rust-версия: у Python адрес задаётся аргументами uvicorn) ---
     pub api_host: String,
@@ -284,6 +286,28 @@ impl Settings {
         }
 
         let coordinator_accounts_enabled = r.boolean("coordinator_accounts_enabled", false);
+        let mobile_push_enabled = r.boolean("mobile_push_enabled", false);
+        let firebase_project_id = r
+            .raw("firebase_project_id")
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned);
+        if mobile_push_enabled {
+            if !coordinator_accounts_enabled {
+                r.problem(
+                    "MOBILE_PUSH_ENABLED",
+                    "requires COORDINATOR_ACCOUNTS_ENABLED=true".into(),
+                );
+            }
+            if !firebase_project_id.as_ref().is_some_and(|id| {
+                id.len() <= 63 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            }) {
+                r.problem(
+                    "FIREBASE_PROJECT_ID",
+                    "set the project ID from the Firebase console".into(),
+                );
+            }
+        }
         let coordinator_access_key = if coordinator_accounts_enabled {
             None
         } else {
@@ -308,6 +332,8 @@ impl Settings {
             default_user_id: r.string("default_user_id", "coordinator"),
             coordinator_access_key,
             coordinator_accounts_enabled,
+            mobile_push_enabled,
+            firebase_project_id,
             api_host: r.string("api_host", "0.0.0.0"),
             api_port: r.number("api_port", 8080u16, |_| true, ""),
             database_url,
