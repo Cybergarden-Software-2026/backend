@@ -14,6 +14,7 @@ pub mod change_detector;
 pub mod constants;
 pub mod cursors;
 pub mod grouping;
+pub mod header;
 pub mod incident_query;
 pub mod llm;
 pub mod mass_problems;

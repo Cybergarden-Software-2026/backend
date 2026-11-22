@@ -13,6 +13,7 @@ use dashboard_config::Settings;
 use dashboard_domain::change_detector::{ImportPlan, IncidentPlan, PlanOptions, build_import_plan};
 use dashboard_domain::constants::{ChangeType, DashboardEventReason, NotificationType, SourceStatus};
 use dashboard_domain::validator::{ValidatedSnapshot, parse_and_validate};
+use dashboard_store::bell;
 use dashboard_store::import_repo::{
     self as repo, ImportState, NewChangeEvent, NewIncidentChange, NewNotification,
 };
@@ -305,9 +306,9 @@ impl ImportService {
         sha256: &str,
         fingerprint: FileFingerprint,
     ) -> Result<ImportOutcome, ImportError> {
-        let now = self.now();
         let mut tx = self.pool.begin().await?;
         let mut state = repo::lock_state(&mut tx).await?;
+        let now = self.now();
         let rows = repo::all_incidents(&mut tx).await?;
         let is_initial = state.last_success_at.is_none() && rows.is_empty();
         crate::assignment::reconcile_source(
@@ -498,6 +499,12 @@ pub(crate) async fn apply_plan(
     revision: i64,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
+    // This transaction maintains the bell state itself. Older importers rely on the SQL trigger.
+    sqlx::query("SET LOCAL underctrl.mobile_bell_writer = '1'")
+        .execute(&mut *conn)
+        .await?;
+    let previous: Vec<_> = plan.items.iter().filter_map(|item| item.pk).collect();
+    bell::before_changes(conn, &previous, now).await?;
     // 1. Реестр. SQLAlchemy при flush выполняет UPDATE раньше INSERT — тот же порядок здесь.
     let mut pks: HashMap<usize, i64> = HashMap::new();
     for (index, item) in plan.items.iter().enumerate() {
@@ -566,16 +573,27 @@ pub(crate) async fn apply_plan(
     repo::insert_history(conn, &history).await?;
 
     // 4. Уведомления координатора (идемпотентно по dedup_key).
+    let mut changed = bell::ChangedIncidents {
+        initial: plan.is_initial,
+        ..Default::default()
+    };
     for (index, item) in plan.items.iter().enumerate() {
+        let pk = pks[&index];
         let ce = change_events[index];
+        if item.changes.iter().any(|change| change.field == "sysId") {
+            changed.changed_sys_id.insert(pk);
+        }
         for draft in &item.notifications {
+            if draft.kind == NotificationType::CriticalRaised {
+                changed.critical_raised.insert(pk);
+            }
             let mut payload = draft.payload.clone();
             payload.insert("changeEventId".into(), ce.map_or(Value::Null, Value::from));
             repo::add_notification(
                 conn,
                 &NewNotification {
                     kind: draft.kind.as_str().to_owned(),
-                    incident_pk: Some(pks[&index]),
+                    incident_pk: Some(pk),
                     incident_id: Some(item.incident_id.clone()),
                     sys_id: Some(item.sys_id.clone()),
                     incident_revision: Some(item.new_revision),
@@ -590,6 +608,8 @@ pub(crate) async fn apply_plan(
             .await?;
         }
     }
+    let ids: Vec<_> = pks.into_values().collect();
+    bell::after_changes(conn, &ids, now, &changed).await?;
     Ok(())
 }
 

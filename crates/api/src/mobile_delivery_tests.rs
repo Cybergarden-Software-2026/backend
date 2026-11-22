@@ -86,6 +86,49 @@ async fn event(env: &common::Env, key: &str) {
 }
 
 #[tokio::test]
+async fn a_header_bell_has_one_event_id_on_android_web_and_redelivery() {
+    let Some(env) = common::Env::new().await else {
+        return;
+    };
+    pair(&env, "phone").await;
+    pair(&env, "browser").await;
+    sqlx::query("UPDATE mobile_devices SET platform = 'web' WHERE account_login = 'browser'")
+        .execute(env.pool())
+        .await
+        .unwrap();
+    sqlx::query("SELECT enqueue_mobile_bell('waiting', 'INC2', 'sys2', now())")
+        .execute(env.pool())
+        .await
+        .unwrap();
+
+    let first = claim(env.pool()).await.unwrap().unwrap();
+    let second = claim(env.pool()).await.unwrap().unwrap();
+    assert_ne!(first.device_id, second.device_id);
+    assert_eq!(first.event.notification_id, second.event.notification_id);
+    for job in [&first, &second] {
+        assert_eq!(job.event.bell_kind.as_deref(), Some("waiting"));
+        assert_eq!(job.event.sys_id, "sys2");
+        assert_eq!(job.event.incident_id, "INC2");
+    }
+    finish(env.pool(), &first, Ok(())).await.unwrap();
+    finish(env.pool(), &second, Err(SendError::Retry { after: None }))
+        .await
+        .unwrap();
+    assert!(claim(env.pool()).await.unwrap().is_none());
+    sqlx::query("UPDATE mobile_push_deliveries SET available_at = now()")
+        .execute(env.pool())
+        .await
+        .unwrap();
+    let retry = claim(env.pool()).await.unwrap().unwrap();
+    assert_eq!(retry.event.notification_id, second.event.notification_id);
+    assert_eq!(retry.device_id, second.device_id);
+    assert_eq!(retry.event.bell_kind.as_deref(), Some("waiting"));
+    finish(env.pool(), &retry, Ok(())).await.unwrap();
+    assert!(claim(env.pool()).await.unwrap().is_none());
+    env.finish().await;
+}
+
+#[tokio::test]
 async fn claims_retry_and_finish_only_the_current_lease_and_fcm_token() {
     let Some(env) = common::Env::new().await else {
         return;
@@ -98,8 +141,9 @@ async fn claims_retry_and_finish_only_the_current_lease_and_fcm_token() {
     let jobs: Vec<_> = [left.unwrap(), right.unwrap()].into_iter().flatten().collect();
     assert_eq!(jobs.len(), 1);
     let job = &jobs[0];
-    assert_eq!(job.incident_id, "INC1");
-    assert_eq!(job.sys_id, "sys1");
+    assert!(job.event.bell_kind.is_none());
+    assert_eq!(job.event.incident_id, "INC1");
+    assert_eq!(job.event.sys_id, "sys1");
     assert!(job.ttl <= Duration::from_secs(3600));
 
     finish(

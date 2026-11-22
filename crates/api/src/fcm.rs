@@ -17,6 +17,13 @@ pub(crate) struct FcmClient {
     credentials: CustomServiceAccount,
 }
 
+pub(crate) struct PushEvent {
+    pub notification_id: i64,
+    pub bell_kind: Option<String>,
+    pub incident_id: String,
+    pub sys_id: String,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SendError {
     InvalidRegistration,
@@ -50,12 +57,10 @@ impl FcmClient {
         &self,
         token: &str,
         target_type: &str,
-        notification_id: i64,
-        incident_id: &str,
-        sys_id: &str,
+        event: &PushEvent,
         ttl: Duration,
     ) -> Result<(), SendError> {
-        let payload = message(token, target_type, notification_id, incident_id, sys_id, ttl)?;
+        let payload = message(token, target_type, event, ttl)?;
         // The auth provider caches and refreshes OAuth tokens by scope.
         let Ok(Ok(access)) =
             tokio::time::timeout(Duration::from_secs(12), self.credentials.token(&[SCOPE])).await
@@ -89,20 +94,36 @@ fn service_account(key: &str) -> anyhow::Result<CustomServiceAccount> {
     CustomServiceAccount::from_json(key).context("Failed to load Firebase service account")
 }
 
-fn message(
-    token: &str,
-    target_type: &str,
-    notification_id: i64,
-    incident_id: &str,
-    sys_id: &str,
-    ttl: Duration,
-) -> Result<Value, SendError> {
+fn message(token: &str, target_type: &str, event: &PushEvent, ttl: Duration) -> Result<Value, SendError> {
     // Validate the target before using it as the field name. A mobile registration
     // can address only one installation, including on older token-based SDKs.
     if !matches!(target_type, "fid" | "token") {
         return Err(SendError::Rejected);
     }
-    let title = "Критический сбой";
+    let (event_type, title, fallback) = match event.bell_kind.as_deref() {
+        None => (
+            NotificationType::CriticalRaised.as_str(),
+            "Критический сбой",
+            "Обнаружен критический инцидент",
+        ),
+        Some("critical") => (
+            "header.critical",
+            "Критический инцидент обновлён",
+            "Проверьте критический инцидент",
+        ),
+        Some("waiting") => (
+            "header.waiting",
+            "Инцидент ожидает распределения",
+            "Инцидент на координаторах больше 8 минут",
+        ),
+        Some("deadline") => (
+            "header.deadline",
+            "Предупреждение о сроке решения",
+            "Проверьте срок решения инцидента",
+        ),
+        Some(_) => return Err(SendError::Rejected),
+    };
+    let incident_id = event.incident_id.as_str();
     let body = if !incident_id.is_empty()
         && incident_id.len() <= 80
         && incident_id
@@ -111,20 +132,20 @@ fn message(
     {
         format!("Инцидент {incident_id}")
     } else {
-        "Обнаружен критический инцидент".into()
+        fallback.into()
     };
     let ttl_seconds = ttl.as_secs().min(MAX_TTL_SECONDS);
-    let id = notification_id.to_string();
+    let id = event.notification_id.to_string();
     // Notification messages always collapse on Android. Its client renders each data
     // message locally, using notificationId to deduplicate at-least-once delivery.
     Ok(json!({ "message": {
         (target_type): token,
         "data": {
-            "type": NotificationType::CriticalRaised, "notificationId": id,
+            "type": event_type, "notificationId": id,
             // Oversized source identifiers stay in the dashboard. Never truncate
             // an identifier into a different valid one or exceed FCM's 4 KiB data limit.
             "incidentId": if incident_id.len() <= 256 { incident_id } else { "" },
-            "sysId": if sys_id.len() <= 256 { sys_id } else { "" },
+            "sysId": if event.sys_id.len() <= 256 { event.sys_id.as_str() } else { "" },
             "title": title, "body": body
         },
         "android": { "priority": "high", "ttl": format!("{ttl_seconds}s") },
@@ -195,6 +216,15 @@ mod tests {
     use super::*;
     use axum::{Json, Router, http::HeaderMap, routing::post};
 
+    fn event(bell_kind: Option<&str>) -> PushEvent {
+        PushEvent {
+            notification_id: 42,
+            bell_kind: bell_kind.map(str::to_owned),
+            incident_id: "INC123".into(),
+            sys_id: "001".into(),
+        }
+    }
+
     async fn mock_fcm(headers: HeaderMap, Json(payload): Json<Value>) -> impl axum::response::IntoResponse {
         assert_eq!(headers["authorization"], "Bearer test-access");
         let message = &payload["message"];
@@ -261,7 +291,7 @@ mod tests {
             ("token", "busy", retry()),
             ("token", "unavailable", retry()),
         ] {
-            let payload = message(token, target_type, 42, "INC123", "001", Duration::from_secs(55)).unwrap();
+            let payload = message(token, target_type, &event(None), Duration::from_secs(55)).unwrap();
             assert_eq!(
                 post_message(&http, &endpoint, "test-access", &payload).await,
                 expected
@@ -271,11 +301,41 @@ mod tests {
     }
 
     #[test]
+    fn all_header_signals_include_display_text_for_android_and_web() {
+        for (kind, event_type, title) in [
+            ("critical", "header.critical", "Критический инцидент обновлён"),
+            ("waiting", "header.waiting", "Инцидент ожидает распределения"),
+            ("deadline", "header.deadline", "Предупреждение о сроке решения"),
+        ] {
+            let event = event(Some(kind));
+            let payload = message("installation", "fid", &event, Duration::from_secs(300)).unwrap();
+            let msg = &payload["message"];
+            let data = &msg["data"];
+            assert_eq!(data["type"], event_type);
+            assert_eq!(data["title"], title);
+            assert_eq!(data["body"], "Инцидент INC123");
+            assert_eq!(data["notificationId"], "42");
+            assert_eq!(data["sysId"], "001");
+            assert_eq!(data["incidentId"], "INC123");
+            assert_eq!(msg["android"], json!({"priority": "high", "ttl": "300s"}));
+            assert!(msg.get("notification").is_none());
+            assert_eq!(
+                msg["webpush"]["headers"],
+                json!({"TTL": "300", "Urgency": "high"})
+            );
+            assert_eq!(
+                msg["webpush"]["notification"],
+                json!({"title": title, "body": data["body"], "tag": "42"})
+            );
+        }
+    }
+
+    #[test]
     fn rejects_unsupported_credential_endpoint_and_target() {
         let error = service_account(r#"{"token_uri":"not a Google token endpoint"}"#).unwrap_err();
         assert!(error.to_string().contains("Invalid Google OAuth endpoint"));
         assert_eq!(
-            message("invalid", "topic", 42, "INC123", "001", Duration::ZERO),
+            message("invalid", "topic", &event(None), Duration::ZERO),
             Err(SendError::Rejected)
         );
     }
