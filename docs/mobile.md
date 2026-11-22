@@ -39,6 +39,7 @@ Content-Type: application/json
 | `POST /mobile/session` | Обменять `{code,deviceId,platform?}` на сессию | `201 {token,tokenType,deviceId,user:{login,displayName}}` |
 | `GET /mobile/session` | Проверить сохранённый Bearer и получить профиль | `200 {deviceId,user:{login,displayName}}` |
 | `GET /mobile/incidents` | Получить все текущие инциденты и условия хедера | `200 {revision,serverTime,items}`, полный снимок одним запросом. |
+| `POST /mobile/incidents/{sysId}/team-contact` | Записать подтверждённый контакт с назначенной командой | `201` с событием, `200` с тем же событием при повторе запроса. |
 | `GET /mobile/notifications` | Загрузить журнал уведомлений панели с отметками чтения своего аккаунта | `200 {items,nextCursor,unreadCount}`. `limit` по умолчанию 50 (1–200), для следующей страницы передайте `cursor=nextCursor`. Пустой журнал — `{"items":[],"nextCursor":null,"unreadCount":0}`. |
 | `PUT /mobile/notifications/{notification_id}/read` | Отметить уведомление прочитанным для своего аккаунта. ID берётся из `items[].id`, тело пустое. | `204`, повторный запрос также возвращает `204`. |
 | `PUT /mobile/devices/current/token` | Подключить push или обновить адрес доставки Firebase | `204`, тело ответа пустое. Пример ниже. |
@@ -61,6 +62,8 @@ Content-Type: application/json
     "normalizedState": "Assigned",
     "priorityId": 2,
     "assignedGroupName": "КЦ ИТ Координаторы Массовых Инцидентов",
+    "teamPhone": "+78194693716",
+    "teamPhoneIsTest": true,
     "submitDate": "2026-11-22T09:00:00.000Z",
     "lastAssignmentToTeamDateTime": null,
     "deadline": "2026-11-22T10:00:00.000Z",
@@ -80,6 +83,54 @@ Content-Type: application/json
 Значение `null` означает, что в момент `serverTime` карточку показывать не нужно. Завершённые инциденты, которые ещё есть в снимке, также получают `null`. Даты передаются в UTC с миллисекундами. У инцидента могут отсутствовать заголовок, команда, дедлайн и дата последнего назначения — эти поля тогда содержат `null`.
 
 При обновлении экрана пересчитывайте список по новому ответу, даже если `revision` прежняя. Ожидание и остаток срока меняются с ходом времени. До первого успешного импорта сервер отвечает `503 SOURCE_NOT_READY`. Для успешно принятого пустого снимка ответ — `200` с пустым массивом `items`.
+
+## Связь с командой
+
+В `GET /mobile/incidents` поле `teamPhone` содержит номер команды в международном формате. Если команда отсутствует в справочнике или у инцидента нет команды, сервер возвращает `teamPhone: null` и `teamPhoneIsTest: false`. `teamPhoneIsTest: true` помечает сгенерированный номер из диапазона `+7 819`. Такой номер можно показывать как тестовый. Для действия `tel:` используйте непустой `teamPhone` с `teamPhoneIsTest: false`. Справочник `GET /teams` содержит эти данные в полях `phone` и `phoneIsTest` и доступен через веб-сессию.
+
+Отправьте запрос после того, как координатор подтвердил, что связался с командой. Возьмите `sysId` и `assignedGroupName` из карточки. Генерируйте новый UUID `requestId` на каждое подтверждение и сохраняйте его до получения ответа, чтобы повтор после сетевого сбоя вернул то же событие. В примере инцидент уже назначен на команду «Инфраструктура».
+
+```http
+POST /api/v1/mobile/incidents/10027/team-contact
+Authorization: Bearer <токен мобильной сессии>
+Content-Type: application/json
+
+{"team":"Инфраструктура","requestId":"e8b7f394-3862-498f-83e2-65d2a1db6492"}
+```
+
+Пример ответа `201 Created`.
+
+```json
+{
+  "eventId": 517,
+  "revision": 43,
+  "incidentRevision": 5,
+  "sysId": "10027",
+  "incidentId": "INC000027",
+  "header": "Касса не принимает оплату",
+  "at": "2026-11-22T09:15:00Z",
+  "types": ["team_contacted"],
+  "fields": [],
+  "previous": null,
+  "current": null,
+  "contact": {
+    "team": "Инфраструктура",
+    "actorLogin": "shift-a",
+    "actorDisplayName": "Анна",
+    "requestId": "e8b7f394-3862-498f-83e2-65d2a1db6492"
+  }
+}
+```
+
+Сервер берёт автора из сессии, а время из своих часов. Событие доступно в веб-журнале через `GET /events?type=team_contacted`, в `GET /incidents/{key}/events` и в снимках SSE. Для строки журнала используйте тип и данные события, например «Анна связалась с командой Инфраструктура».
+
+| Ответ | Действие клиента |
+|---|---|
+| `200` | Обработать возвращённое событие так же, как успешный первый запрос. |
+| `404 INCIDENT_NOT_FOUND` | Обновить список инцидентов. |
+| `409 TEAM_CONTACT_ASSIGNMENT_CHANGED` | Обновить карточку и проверить новую команду перед подтверждением. |
+| `409 TEAM_CONTACT_UNAVAILABLE` | Обновить карточку. Фактический контакт можно записать при наличии назначенной команды-исполнителя. |
+| `409 TEAM_CONTACT_REQUEST_CONFLICT` | Повторить с исходной командой и UUID для той же операции. Для нового контакта создать новый UUID. |
 
 ## Подключение Firebase после входа
 

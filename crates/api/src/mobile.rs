@@ -26,6 +26,10 @@ pub(crate) fn routes(state: AppState) -> Router<AppState> {
     let account_data = Router::new()
         .route("/mobile/incidents", get(crate::mobile_incidents::list))
         .route(
+            "/mobile/incidents/{sys_id}/team-contact",
+            post(crate::team_contact::record),
+        )
+        .route(
             "/mobile/notifications",
             get(crate::notifications::list_notifications),
         )
@@ -151,7 +155,7 @@ fn valid_fcm_token(token: &str) -> ApiResult<()> {
     }
 }
 
-fn json_error(err: JsonRejection) -> AppError {
+pub(crate) fn json_error(err: JsonRejection) -> AppError {
     match err.status() {
         StatusCode::UNSUPPORTED_MEDIA_TYPE => AppError::new(
             err.status(),

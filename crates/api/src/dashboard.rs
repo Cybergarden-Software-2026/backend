@@ -314,6 +314,7 @@ async fn events(state: &AppState, r: EventsRequest) -> ApiResult<Value> {
             event_type: r.event_type.map(ChangeEventType::as_str),
             incident_pk,
             sys_id: r.sys_id.as_deref(),
+            revision: None,
         },
     )
     .await?;

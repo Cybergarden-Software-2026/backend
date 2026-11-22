@@ -166,6 +166,7 @@ pub struct ChangeEventRow {
     /// JSON `null` и SQL NULL в ответе неразличимы (`null`).
     pub previous: Option<Value>,
     pub current: Option<Value>,
+    pub contact: Option<Value>,
 }
 
 /// Поля `import_state`, которые нужны API.
@@ -367,7 +368,7 @@ pub fn group_views<I: Groupable + ?Sized>(groups: &[GroupResult<'_, I>]) -> Valu
 
 /// `ChangeEventView`.
 pub fn change_event_view(ce: &ChangeEventRow) -> Value {
-    json!({
+    let mut value = json!({
         "eventId": ce.id,
         "revision": ce.revision,
         "sysId": ce.sys_id,
@@ -379,7 +380,11 @@ pub fn change_event_view(ce: &ChangeEventRow) -> Value {
         "previous": ce.previous.clone().unwrap_or(Value::Null),
         "current": ce.current.clone().unwrap_or(Value::Null),
         "incidentRevision": ce.incident_revision,
-    })
+    });
+    if let Some(contact) = &ce.contact {
+        value["contact"] = contact.clone();
+    }
+    value
 }
 
 /// `PurePosixPath(path).name`: последний компонент без `.` и пустых (`..` сохраняется).

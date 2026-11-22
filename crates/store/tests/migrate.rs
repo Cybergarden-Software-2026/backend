@@ -80,6 +80,19 @@ impl TempDb {
     }
 }
 
+async fn rollback_team_features(pool: &PgPool) {
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0011_team_contact_events_down.sql"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!("../../../migrations/0010_team_phones_down.sql"))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 fn rand_suffix() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
@@ -126,9 +139,9 @@ async fn empty_database_is_migrated_and_marked_for_alembic() {
     let Some(db) = TempDb::create().await else { return };
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     assert!(report.adopted_from_alembic.is_empty());
-    assert_eq!(report.alembic_revision.as_deref(), Some("0009"));
+    assert_eq!(report.alembic_revision.as_deref(), Some("0011"));
 
     assert_eq!(
         db.tables().await,
@@ -138,7 +151,7 @@ async fn empty_database_is_migrated_and_marked_for_alembic() {
     assert_eq!(
         db.scalar_strings("SELECT version_num::text FROM alembic_version")
             .await,
-        vec!["0009"]
+        vec!["0011"]
     );
     // Сид из SQL на месте.
     assert_eq!(
@@ -150,7 +163,7 @@ async fn empty_database_is_migrated_and_marked_for_alembic() {
     // Повторный запуск — без изменений.
     let again = migrate::run(&db.pool).await.unwrap();
     assert!(again.applied.is_empty() && again.adopted_from_alembic.is_empty());
-    assert_eq!(again.alembic_revision.as_deref(), Some("0009"));
+    assert_eq!(again.alembic_revision.as_deref(), Some("0011"));
 
     db.drop().await;
 }
@@ -184,10 +197,10 @@ async fn coordinator_sessions_upgrade_preserves_existing_cluster_reviews() {
     .unwrap();
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![5, 6, 7, 8, 9]);
+    assert_eq!(report.applied, vec![5, 6, 7, 8, 9, 10, 11]);
     assert!(report.adopted_from_alembic.is_empty());
     assert!(report.reverted_by_alembic.is_empty());
-    assert_eq!(report.alembic_revision.as_deref(), Some("0009"));
+    assert_eq!(report.alembic_revision.as_deref(), Some("0011"));
     assert_eq!(
         db.scalar_strings("SELECT kind || ':' || model FROM analysis_jobs")
             .await,
@@ -224,8 +237,8 @@ async fn coordinator_accounts_upgrade_keeps_legacy_sessions_unlinked() {
     .unwrap();
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![6, 7, 8, 9]);
-    assert_eq!(report.alembic_revision.as_deref(), Some("0009"));
+    assert_eq!(report.applied, vec![6, 7, 8, 9, 10, 11]);
+    assert_eq!(report.alembic_revision.as_deref(), Some("0011"));
     assert_eq!(
         db.scalar_strings(
             "SELECT encode(token_hash, 'hex') FROM coordinator_sessions WHERE account_login IS NULL"
@@ -261,7 +274,7 @@ async fn mobile_session_migration_preserves_legacy_push_registration_in_both_dir
     let legacy = db.scalar_strings(ALL_DEVICES).await;
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![8, 9]);
+    assert_eq!(report.applied, vec![8, 9, 10, 11]);
     assert_eq!(
         db.scalar_strings(
             "SELECT (to_jsonb(d) - 'client_device_id' - 'fcm_registered_at')::text FROM mobile_devices d \
@@ -278,6 +291,7 @@ async fn mobile_session_migration_preserves_legacy_push_registration_in_both_dir
     .execute(&db.pool)
     .await
     .unwrap();
+    rollback_team_features(&db.pool).await;
     sqlx::raw_sql(include_str!("../../../migrations/0009_mobile_bell_down.sql"))
         .execute(&db.pool)
         .await
@@ -325,7 +339,7 @@ async fn bell_upgrade_preserves_queued_pushes_and_sends_new_events_only_to_exist
     assert_eq!(pending.len(), 2);
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![9]);
+    assert_eq!(report.applied, vec![9, 10, 11]);
     assert_eq!(
         db.scalar_strings(
             "SELECT 'baseline' FROM mobile_bell_state WHERE NOT initialized AND next_check_at IS NOT NULL"
@@ -364,6 +378,7 @@ async fn bell_upgrade_preserves_queued_pushes_and_sends_new_events_only_to_exist
         .await;
     assert_eq!(event_ids.len(), 2); // one journal ID and one shared bell ID
 
+    rollback_team_features(&db.pool).await;
     sqlx::raw_sql(include_str!("../../../migrations/0009_mobile_bell_down.sql"))
         .execute(&db.pool)
         .await
@@ -446,9 +461,9 @@ async fn database_created_by_alembic_is_adopted_without_running_sql() {
         .unwrap();
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.applied, vec![2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(report.applied, vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     assert_eq!(report.adopted_from_alembic, vec![1]);
-    assert_eq!(report.alembic_revision.as_deref(), Some("0009"));
+    assert_eq!(report.alembic_revision.as_deref(), Some("0011"));
     assert_eq!(
         db.scalar_strings("SELECT status FROM import_state WHERE id = 1")
             .await,
@@ -499,12 +514,60 @@ async fn concurrent_runs_apply_once() {
     );
     let reports = [a.unwrap(), b.unwrap(), c.unwrap()];
     let applied: Vec<i64> = reports.iter().flat_map(|r| r.applied.clone()).collect();
-    assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     assert_eq!(
         db.scalar_strings("SELECT version_num::text FROM alembic_version")
             .await,
-        vec!["0009"]
+        vec!["0011"]
     );
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn team_contact_audit_and_retry_key_survive_downgrade_and_reapply() {
+    let Some(db) = TempDb::create().await else { return };
+    migrate::run(&db.pool).await.unwrap();
+    sqlx::raw_sql(
+        r#"WITH incident AS (
+               INSERT INTO incidents (id, sys_id, normalized_state, priority_id, submit_date, raw, content_hash)
+               VALUES ('INC1', 'sys-1', 'Assigned', 1, now(), '{}', 'seed') RETURNING pk
+           ), event AS (
+               INSERT INTO dashboard_events (event_type, reason, payload)
+               VALUES ('dashboard.changed', 'team_contacted',
+                   '{"sysId":"sys-1","contact":{"team":"Team A","actorLogin":"alice","requestId":"f2f138a6-6482-44a5-a5d0-3989c05bc9a4"}}')
+               RETURNING id
+           )
+           INSERT INTO change_events (revision, incident_pk, incident_revision, sys_id, incident_id, types)
+           SELECT event.id, incident.pk, 2, 'sys-1', 'INC1', ARRAY['team_contacted'] FROM event, incident"#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0011_team_contact_events_down.sql"
+    ))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE alembic_version SET version_num = '0010'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    const CONTACT: &str = "SELECT d.reason || ':' || (d.payload->'contact'->>'team')
+        FROM change_events c JOIN dashboard_events d ON d.id = c.revision
+        WHERE 'team_contacted' = ANY(c.types)";
+    assert_eq!(db.scalar_strings(CONTACT).await, ["source:Team A"]);
+    let report = migrate::run(&db.pool).await.unwrap();
+    assert_eq!(report.applied, vec![11]);
+    assert_eq!(db.scalar_strings(CONTACT).await, ["team_contacted:Team A"]);
+    let duplicate = sqlx::query(
+        "INSERT INTO dashboard_events (event_type, reason, payload)
+         SELECT event_type, reason, payload FROM dashboard_events WHERE reason = 'team_contacted'",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap_err();
+    assert!(duplicate.as_database_error().unwrap().is_unique_violation());
     db.drop().await;
 }
 
@@ -514,6 +577,7 @@ async fn concurrent_runs_apply_once() {
 async fn alembic_downgrade_is_respected() {
     let Some(db) = TempDb::create().await else { return };
     migrate::run(&db.pool).await.unwrap();
+    rollback_team_features(&db.pool).await;
     sqlx::raw_sql(include_str!("../../../migrations/0009_mobile_bell_down.sql"))
         .execute(&db.pool)
         .await
@@ -560,8 +624,11 @@ async fn alembic_downgrade_is_respected() {
         .unwrap();
 
     let report = migrate::run(&db.pool).await.unwrap();
-    assert_eq!(report.reverted_by_alembic, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(
+        report.reverted_by_alembic,
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    );
+    assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     assert_eq!(
         db.tables().await,
         with_service_tables(&["_sqlx_migrations", "alembic_version"])
@@ -569,7 +636,7 @@ async fn alembic_downgrade_is_respected() {
     assert_eq!(
         db.scalar_strings("SELECT version_num::text FROM alembic_version")
             .await,
-        vec!["0009"]
+        vec!["0011"]
     );
     db.drop().await;
 }

@@ -13,14 +13,17 @@ use crate::{ApiResult, AppError, AppState};
 
 pub async fn teams(State(state): State<AppState>) -> ApiResult<PyJson> {
     let mut data = load(&state, false).await?;
-    let counts: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT t.name, count(i.pk) FROM teams t LEFT JOIN incidents i
+    let counts: Vec<(String, i64, String, bool)> = sqlx::query_as(
+        "SELECT t.name, count(i.pk), coalesce(t.phone, team_demo_phone(t.name)), t.phone IS NULL
+         FROM teams t LEFT JOIN incidents i
          ON i.assigned_group_name = t.name AND i.is_present AND i.normalized_state NOT IN ('Closed', 'Resolved')
          GROUP BY t.name ORDER BY t.name")
         .fetch_all(data.conn()).await?;
     let items: Vec<_> = counts
         .into_iter()
-        .map(|(name, count)| json!({"name":name,"activeCount":count}))
+        .map(|(name, count, phone, phone_is_test)| {
+            json!({"name": name, "activeCount": count, "phone": phone, "phoneIsTest": phone_is_test})
+        })
         .collect();
     Ok(PyJson(json!({"items": items, "revision": data.revision})))
 }

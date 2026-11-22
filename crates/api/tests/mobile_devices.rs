@@ -123,6 +123,145 @@ async fn login_device(app: &Router, code: &str, device_id: &str) -> Response {
 }
 
 #[tokio::test]
+async fn mobile_team_contact_is_attributed_published_and_retry_safe() {
+    let Some(mut env) = Env::with_vars(&[("COORDINATOR_ACCOUNTS_ENABLED", "true")]).await else {
+        return;
+    };
+    let app = router(AppState::with_clock(
+        env.settings.clone(),
+        env.pool().clone(),
+        env.clock.as_clock(),
+    ));
+    let cookie = owner(&env, &app, "alice").await;
+    sqlx::query("UPDATE coordinator_accounts SET display_name = 'Alice Example' WHERE login = 'alice'")
+        .execute(env.pool())
+        .await
+        .unwrap();
+    let session = read(
+        login_device(&app, &pairing(&app, &cookie).await, "contact-phone").await,
+        StatusCode::CREATED,
+    )
+    .await;
+    let auth = format!("Bearer {}", session["token"].as_str().unwrap());
+    let mobile = [("authorization", auth.as_str()), ("x-user-id", "imposter")];
+    let web = [("cookie", cookie.as_str())];
+    let mut incident = common::records().remove(0);
+    common::update(&mut incident, &[("assignedGroupName", json!("Team A"))]);
+    let sys_id = incident["sysId"].as_str().unwrap().to_owned();
+    let path = format!("{INCIDENTS}/{sys_id}/team-contact");
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let request = json!({"team":"Team A", "requestId": request_id});
+
+    let unauthorized = read(
+        call(&app, "POST", &path, &web, Some(request.clone())).await,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    assert_eq!(unauthorized["code"], "MOBILE_SESSION_UNAUTHORIZED");
+    let initializing = read(
+        call(&app, "POST", &path, &mobile, Some(request.clone())).await,
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+    assert_eq!(initializing["code"], "SOURCE_NOT_READY");
+
+    env.write_json(&[incident.clone()]);
+    assert!(env.tick().await.accepted());
+    let bell_before = env
+        .string("SELECT to_jsonb(b)::text FROM mobile_bell_state b")
+        .await;
+    let (first, second) = tokio::join!(
+        call(&app, "POST", &path, &mobile, Some(request.clone())),
+        call(&app, "POST", &path, &mobile, Some(request.clone())),
+    );
+    let (created, replay) = if first.status() == StatusCode::CREATED {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let event = read(created, StatusCode::CREATED).await;
+    assert_eq!(read(replay, StatusCode::OK).await, event);
+    assert_eq!(event["sysId"], sys_id);
+    assert_eq!(event["types"], json!(["team_contacted"]));
+    assert_eq!(event["fields"], json!([]));
+    assert_eq!(event["current"], Value::Null);
+    assert_eq!(event["incidentRevision"], 2);
+    assert_eq!(
+        event["contact"],
+        json!({
+            "team":"Team A", "actorLogin":"alice", "actorDisplayName":"Alice Example", "requestId":request_id,
+        })
+    );
+    assert_eq!(
+        env.string("SELECT to_jsonb(b)::text FROM mobile_bell_state b")
+            .await,
+        bell_before
+    );
+    assert_eq!(env.i64("SELECT count(*) FROM mobile_push_deliveries").await, 0);
+    assert_eq!(
+        env.i64("SELECT count(*) FROM dashboard_events WHERE reason = 'assignment'")
+            .await,
+        0
+    );
+    assert_eq!(
+        env.i64("SELECT max(id) FROM dashboard_events").await,
+        event["revision"].as_i64().unwrap()
+    );
+
+    let history = format!("/api/v1/incidents/{sys_id}/events");
+    for route in ["/api/v1/events?type=team_contacted", &history] {
+        let journal = read(call(&app, "GET", route, &web, None).await, StatusCode::OK).await;
+        assert_eq!(journal["items"], json!([event]));
+    }
+    let snapshot = read(
+        call(&app, "GET", "/api/v1/snapshot?view=web", &web, None).await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(snapshot["events"], json!([event]));
+
+    common::update(&mut incident, &[("assignedGroupName", json!("Team B"))]);
+    env.write_json(&[incident]);
+    assert!(env.tick().await.accepted());
+    let replay = call(&app, "POST", &path, &mobile, Some(request)).await;
+    assert_eq!(read(replay, StatusCode::OK).await, event);
+    let stale = read(
+        call(
+            &app,
+            "POST",
+            &path,
+            &mobile,
+            Some(json!({"team": "Team A", "requestId": uuid::Uuid::new_v4().to_string()})),
+        )
+        .await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(stale["code"], "TEAM_CONTACT_ASSIGNMENT_CHANGED");
+    assert_eq!(stale["currentTeam"], "Team B");
+    let reused = read(
+        call(
+            &app,
+            "POST",
+            &path,
+            &mobile,
+            Some(json!({"team": "Team B", "requestId": request_id})),
+        )
+        .await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(reused["code"], "TEAM_CONTACT_REQUEST_CONFLICT");
+    assert_eq!(
+        env.i64("SELECT count(*) FROM dashboard_events WHERE reason = 'team_contacted'")
+            .await,
+        1
+    );
+
+    env.finish().await;
+}
+
+#[tokio::test]
 async fn login_requires_personal_accounts_and_fcm_registration_requires_push() {
     for accounts in ["true", "false"] {
         let settings = Settings::from_vars([
@@ -645,16 +784,35 @@ async fn mobile_incidents_returns_the_complete_current_header_input_without_fire
     for (row, expected) in rows.iter().zip(&incidents) {
         assert_eq!(row["sysId"], expected["sysId"]);
     }
+    let directory = read(
+        call(&app, "GET", "/api/v1/teams", &[("cookie", &cookie)], None).await,
+        StatusCode::OK,
+    )
+    .await;
+    let team = directory["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "Team A")
+        .unwrap();
+    let phone = team["phone"].as_str().unwrap();
+    assert_eq!(phone.len(), 12);
+    assert!(phone.starts_with("+7819"));
+    assert!(phone[1..].bytes().all(|byte| byte.is_ascii_digit()));
+    assert_eq!(team["phoneIsTest"], true);
     assert_eq!(
         rows[0],
         json!({
             "sysId":"000000", "id":"INC0000", "header":"Network fault", "normalizedState":"Research",
-            "priorityId":4, "assignedGroupName":"Team A", "submitDate":"2026-11-20T11:00:00.123Z",
+            "priorityId":4, "assignedGroupName":"Team A", "teamPhone":phone, "teamPhoneIsTest":true,
+            "submitDate":"2026-11-20T11:00:00.123Z",
             "deadline":"2026-11-20T12:05:00.987Z", "lastAssignmentToTeamDateTime":"2026-11-20T11:45:00.456Z",
             "headerKind":"critical"
         })
     );
     assert_eq!(rows[1]["headerKind"], "waiting");
+    assert_eq!(rows[1]["teamPhoneIsTest"], true);
+    assert_ne!(rows[1]["teamPhone"], phone);
     assert!(rows[1]["lastAssignmentToTeamDateTime"].is_null());
     assert_eq!(rows[2]["headerKind"], "deadline");
     assert_eq!(rows[6]["headerKind"], "waiting");
@@ -665,9 +823,16 @@ async fn mobile_incidents_returns_the_complete_current_header_input_without_fire
     for row in &rows[3..=5] {
         assert_eq!(row.get("headerKind"), Some(&Value::Null));
     }
-    for key in ["header", "deadline", "assignedGroupName"] {
+    for key in ["header", "deadline", "assignedGroupName", "teamPhone"] {
         assert_eq!(rows[5].get(key), Some(&Value::Null));
     }
+    assert_eq!(rows[5]["teamPhoneIsTest"], false);
+    let configured = "+74950000042";
+    sqlx::query("UPDATE teams SET phone = $1 WHERE name = 'Team A'")
+        .bind(configured)
+        .execute(env.pool())
+        .await
+        .unwrap();
     env.clock.advance(300.0);
     let later = read(call(&app, "GET", INCIDENTS, &headers, None).await, StatusCode::OK).await;
     assert_eq!(later["revision"], snapshot["revision"]);
@@ -679,6 +844,8 @@ async fn mobile_incidents_returns_the_complete_current_header_input_without_fire
         .find(|row| row["sysId"] == "000002")
         .unwrap();
     assert_eq!(expired.get("headerKind"), Some(&Value::Null));
+    assert_eq!(expired["teamPhone"], configured);
+    assert_eq!(expired["teamPhoneIsTest"], false);
 
     env.write_json(&[]);
     assert!(env.tick().await.accepted());

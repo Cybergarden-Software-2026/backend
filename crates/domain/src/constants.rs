@@ -156,6 +156,7 @@ str_enum! {
         Priority = "priority",
         Changed = "changed",
         Removed = "removed",
+        TeamContacted = "team_contacted",
     }
 }
 
@@ -190,6 +191,7 @@ str_enum! {
         Expiry = "expiry",
         Assignment = "assignment",
         MassProblems = "mass_problems",
+        TeamContacted = "team_contacted",
     }
 }
 

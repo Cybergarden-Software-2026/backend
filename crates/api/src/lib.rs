@@ -28,6 +28,7 @@ pub mod request_id;
 pub mod response;
 pub mod sse;
 mod statistics;
+mod team_contact;
 mod web_queue;
 
 use std::any::Any;

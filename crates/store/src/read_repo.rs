@@ -217,6 +217,7 @@ pub struct ChangeEventFilter<'a> {
     pub event_type: Option<&'a str>,
     pub incident_pk: Option<i64>,
     pub sys_id: Option<&'a str>,
+    pub revision: Option<i64>,
 }
 
 /// Новые первыми.
@@ -226,7 +227,9 @@ pub async fn change_events(
 ) -> Result<Vec<ChangeEventRow>, sqlx::Error> {
     let mut q = QueryBuilder::<Postgres>::new(
         "SELECT id, revision, incident_pk, incident_revision, sys_id, incident_id, header, types, \
-         fields, at, previous, \"current\" FROM change_events WHERE true",
+         fields, at, previous, \"current\", CASE WHEN 'team_contacted' = ANY (types) THEN \
+         (SELECT payload->'contact' FROM dashboard_events WHERE id = change_events.revision) END AS contact \
+         FROM change_events WHERE true",
     );
     if let Some(v) = f.before_id {
         q.push(" AND id < ").push_bind(v);
@@ -242,6 +245,9 @@ pub async fn change_events(
     }
     if let Some(v) = f.sys_id {
         q.push(" AND sys_id = ").push_bind(v.to_owned());
+    }
+    if let Some(v) = f.revision {
+        q.push(" AND revision = ").push_bind(v);
     }
     q.push(" ORDER BY id DESC LIMIT ").push_bind(f.limit);
     let rows = q.build().fetch_all(conn).await?;
@@ -260,6 +266,7 @@ pub async fn change_events(
                 at: r.try_get("at")?,
                 previous: r.try_get("previous")?,
                 current: r.try_get("current")?,
+                contact: r.try_get("contact")?,
             })
         })
         .collect()
