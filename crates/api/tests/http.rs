@@ -217,6 +217,7 @@ async fn mobile_contract_distinguishes_session_and_push_bearers() {
         ("post", "session", &qr, "201"),
         ("get", "session", &session, "200"),
         ("delete", "session", &session, "204"),
+        ("get", "incidents", &session, "200"),
         ("get", "notifications", &session, "200"),
         ("put", "notifications/{notification_id}/read", &session, "204"),
         ("get", "devices", &owner, "200"),
@@ -230,6 +231,19 @@ async fn mobile_contract_distinguishes_session_and_push_bearers() {
         assert!(operation["responses"][success].is_object());
     }
     let schemas = &spec["components"]["schemas"];
+    let incidents = &spec["paths"]["/api/v1/mobile/incidents"]["get"]["responses"];
+    assert_eq!(
+        incidents["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/MobileIncidentSnapshot"
+    );
+    assert_eq!(
+        schemas["MobileIncidentSnapshot"]["properties"]["items"]["items"]["$ref"],
+        "#/components/schemas/MobileCurrentIncident"
+    );
+    assert_eq!(
+        schemas["MobileCurrentIncident"]["properties"]["headerKind"]["enum"],
+        json!(["critical", "waiting", "deadline", null])
+    );
     assert_eq!(schemas["MobileLogin"]["required"], json!(["code", "deviceId"]));
     assert_eq!(
         schemas["MobileLogin"]["properties"]["platform"]["default"],

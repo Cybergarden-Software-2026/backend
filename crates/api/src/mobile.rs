@@ -23,7 +23,8 @@ pub(crate) fn routes(state: AppState) -> Router<AppState> {
         .route("/mobile/devices/{device_id}", delete(revoke_device))
         .route_layer(from_fn_with_state(state.clone(), coordinator_session::protect));
 
-    let notifications = Router::new()
+    let account_data = Router::new()
+        .route("/mobile/incidents", get(crate::mobile_incidents::list))
         .route(
             "/mobile/notifications",
             get(crate::notifications::list_notifications),
@@ -35,7 +36,7 @@ pub(crate) fn routes(state: AppState) -> Router<AppState> {
         .route_layer(from_fn_with_state(state.clone(), authenticate_session));
 
     let sessions = account_routes
-        .merge(notifications)
+        .merge(account_data)
         .route("/mobile/session", post(login).get(current_session).delete(logout))
         .route("/mobile/devices/current", delete(unregister))
         .route_layer(from_fn_with_state(state.clone(), require_accounts));
