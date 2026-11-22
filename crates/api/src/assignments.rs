@@ -77,18 +77,14 @@ pub(crate) async fn assign(
         return Err(AppError::bad_request("Выберите команду из справочника."));
     }
     if row.assigned_group_name.as_deref() != Some(&input.team) {
-        let actor = coordinator
-            .as_ref()
-            .map_or(state.settings.default_user_id.as_str(), |value| {
-                value.login.as_str()
-            });
+        let actor_login = coordinator.as_ref().map(|account| account.login.as_str());
         assignment::record_assignment(
             &mut tx,
             &state.settings,
             &row,
             &input.team,
             (state.clock)(),
-            actor,
+            actor_login,
         )
         .await?;
     }

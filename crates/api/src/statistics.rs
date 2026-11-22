@@ -1,3 +1,4 @@
+use axum::Extension;
 use axum::extract::{OriginalUri, State};
 use chrono::{DateTime, Utc};
 use dashboard_config::Settings;
@@ -7,6 +8,7 @@ use dashboard_domain::pycompat::strip;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::coordinator_accounts::Coordinator;
 use crate::params::Params;
 use crate::response::PyJson;
 use crate::{ApiResult, AppError, AppState};
@@ -16,9 +18,9 @@ const KPI_MS: i64 = 10 * 60_000;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Transfer {
+struct Transfer<'a> {
     id: String,
-    coordinator_id: &'static str,
+    coordinator_id: &'a str,
     incident_id: String,
     title: String,
     team: String,
@@ -80,7 +82,11 @@ fn reassignment_duration(
     (prior_at <= assigned_at).then(|| (assigned_at - prior_at).num_milliseconds())
 }
 
-pub async fn shift(State(state): State<AppState>, OriginalUri(uri): OriginalUri) -> ApiResult<PyJson> {
+pub(crate) async fn shift(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    coordinator: Option<Extension<Coordinator>>,
+) -> ApiResult<PyJson> {
     let params = Params::new(&uri);
     let from = time_bound(&params, "from")?;
     let to = time_bound(&params, "to")?;
@@ -88,8 +94,14 @@ pub async fn shift(State(state): State<AppState>, OriginalUri(uri): OriginalUri)
         return Err(AppError::validation("Начало периода должно быть раньше конца."));
     }
 
-    // Read the immutable records from the assignment revision. Later imports can
-    // change the team, priority or title of the current incident.
+    let login = coordinator.as_ref().map(|account| account.login.as_str());
+    let coordinator_id = login.unwrap_or(SHIFT_ID);
+    let coordinator_name = coordinator.as_ref().map_or("Смена координаторов", |account| {
+        account.display_name.as_str()
+    });
+
+    // Read the immutable assignment revision. Older events only stored actor;
+    // the shared actor cannot identify an individual account.
     type AssignmentRow = (
         i64,
         String,
@@ -104,10 +116,14 @@ pub async fn shift(State(state): State<AppState>, OriginalUri(uri): OriginalUri)
            FROM dashboard_events d
            JOIN change_events c ON c.revision = d.id AND c.sys_id = d.payload->>'sysId'
            WHERE d.reason = 'assignment' AND d.created_at >= $1 AND d.created_at < $2
+             AND ($3::text IS NULL OR d.payload->>'actorLogin' = $3
+                  OR (NOT (d.payload ? 'actorLogin') AND d.payload->>'actor' = $3 AND $3 <> $4))
            ORDER BY d.created_at DESC, d.id DESC"#,
     )
     .bind(from)
     .bind(to)
+    .bind(login)
+    .bind(&state.settings.default_user_id)
     .fetch_all(&state.pool)
     .await?;
 
@@ -133,7 +149,7 @@ pub async fn shift(State(state): State<AppState>, OriginalUri(uri): OriginalUri)
         }
         transfers.push(Transfer {
             id: id.to_string(),
-            coordinator_id: SHIFT_ID,
+            coordinator_id,
             title: title.unwrap_or_else(|| incident_id.clone()),
             incident_id,
             team,
@@ -148,7 +164,7 @@ pub async fn shift(State(state): State<AppState>, OriginalUri(uri): OriginalUri)
 
     Ok(PyJson(json!({
         "source": "api",
-        "coordinator": {"id": SHIFT_ID, "name": "Смена координаторов"},
+        "coordinator": {"id": coordinator_id, "name": coordinator_name},
         "start": from.timestamp_millis(),
         "end": to.timestamp_millis(),
         "transferred": transfers.len(),

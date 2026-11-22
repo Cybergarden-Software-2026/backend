@@ -96,7 +96,7 @@ pub async fn record_assignment(
     current: &StoredIncident,
     team: &str,
     now: DateTime<Utc>,
-    actor: &str,
+    actor_login: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     let tz = settings.source_naive_timezone;
     let mut next =
@@ -114,7 +114,13 @@ pub async fn record_assignment(
         resolved_window: TimeDelta::hours(settings.critical_resolved_window_hours.into()),
     };
     let plan = build_import_plan(std::slice::from_ref(current), vec![next], &options);
-    let payload = json!({"schemaVersion": 1, "sysId": current.sys_id, "team": team, "actor": actor});
+    let payload = json!({
+        "schemaVersion": 1,
+        "sysId": current.sys_id,
+        "team": team,
+        "actor": actor_login.unwrap_or(&settings.default_user_id),
+        "actorLogin": actor_login,
+    });
     let revision = repo::new_dashboard_event(conn, DashboardEventReason::Assignment, &payload, now).await?;
     crate::service::apply_plan(conn, &plan, revision, now).await?;
     if settings.llm_enabled {

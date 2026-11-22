@@ -195,7 +195,7 @@ async fn changes_and_local_team_assignment_emit_only_material_header_transitions
         &previous,
         "Team B",
         env.clock.now(),
-        "operator",
+        Some("operator"),
     )
     .await
     .unwrap();
