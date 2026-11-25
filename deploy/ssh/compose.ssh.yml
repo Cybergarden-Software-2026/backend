@@ -1,0 +1,43 @@
+x-runtime: &runtime
+  image: ${UNDERCTRL_BACKEND_IMAGE:?backend image is required}
+  env_file: !override
+    - ${UNDERCTRL_ENV_FILE:?runtime environment file is required}
+
+x-incident-data: &incident-data
+  type: bind
+  source: ${UNDERCTRL_DATA_DIR:?incident data directory is required}
+  target: /data
+  read_only: true
+  bind:
+    create_host_path: false
+
+services:
+  migrate:
+    <<: *runtime
+    build: !reset null
+
+  api:
+    <<: *runtime
+    build: !reset null
+    ports: !reset []
+    volumes: !override
+      - *incident-data
+
+  importer:
+    <<: *runtime
+    build: !reset null
+    volumes: !override
+      - *incident-data
+
+  ai-worker:
+    <<: *runtime
+    build: !reset null
+
+  frontend:
+    image: ${UNDERCTRL_FRONTEND_IMAGE:?frontend image is required}
+    ports:
+      - "127.0.0.1:8005:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

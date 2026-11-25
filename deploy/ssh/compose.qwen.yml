@@ -1,0 +1,23 @@
+x-qwen: &qwen
+  LLM_ENABLED: "true"
+  LLM_MODEL: qwen-local
+
+services:
+  api:
+    environment:
+      <<: *qwen
+  importer:
+    environment:
+      <<: *qwen
+  ai-worker:
+    environment:
+      <<: *qwen
+      LLM_BASE_URL: ${UNDERCTRL_QWEN_URL:?worker Qwen URL is required}
+    networks:
+      - default
+      - qwen
+
+networks:
+  qwen:
+    external: true
+    name: underctrl-ssh-qwen
